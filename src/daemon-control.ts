@@ -48,6 +48,7 @@ export interface WebLaunchOptions {
   titleHostname?: string;
   allowUnauthenticatedNetwork?: boolean;
   multiuser?: boolean;
+  headless?: boolean;
 }
 
 export interface StartResult {
@@ -90,6 +91,7 @@ export function buildWebArgs(options: WebLaunchOptions): string[] {
   if (options.titleHostname) args.push('--title-hostname', options.titleHostname);
   if (options.allowUnauthenticatedNetwork) args.push('--allow-unauthenticated-network');
   if (options.multiuser) args.push('--multiuser');
+  if (options.headless) args.push('--headless');
   return args;
 }
 

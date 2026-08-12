@@ -499,6 +499,10 @@ class CodemanApp {
     this.terminal = null;
     this.fitAddon = null;
     this.activeSessionId = null;
+    this.currentNodeId = (() => {
+      try { return localStorage.getItem('codeman-current-node') || 'local'; } catch { return 'local'; }
+    })();
+    this.nodes = [];
 
     // ── Session detach / undock (beta) ───────────────────────────────────
     // A "solo window" is a popped-out browser window showing exactly one
@@ -836,6 +840,8 @@ class CodemanApp {
   // ═══════════════════════════════════════════════════════════════
 
   init() {
+    this._installNodeFetchProxy?.();
+    this.loadFederationNodes?.();
     // Initialize mobile detection first (adds device classes to body)
     MobileDetection.init();
     // Detach/undock: open the cross-window sync channel; if this is a solo
@@ -1446,7 +1452,8 @@ class CodemanApp {
     // regardless of filter (server side).
     const _sseParams = new URLSearchParams({ clientId: this._clientId });
     if (this.activeSessionId) _sseParams.set('sessions', this.activeSessionId);
-    this.eventSource = new EventSource(`/api/events?${_sseParams.toString()}`);
+    const eventsPath = `/api/events?${_sseParams.toString()}`;
+    this.eventSource = new EventSource(this._nodeApiPath ? this._nodeApiPath(eventsPath) : eventsPath);
 
     // Store all event listeners for cleanup on reconnect
     const listeners = [];
@@ -2414,7 +2421,11 @@ class CodemanApp {
     // up to the limit).
     const cid = this._clientId ? `${this._clientId}:${this._wsTabNonce}` : '';
     const cidQuery = cid ? `?cid=${encodeURIComponent(cid)}` : '';
-    const url = `${proto}//${location.host}/ws/sessions/${sessionId}/terminal${cidQuery}`;
+    const wsPath =
+      this.currentNodeId && this.currentNodeId !== 'local'
+        ? `/ws/nodes/${encodeURIComponent(this.currentNodeId)}/sessions/${encodeURIComponent(sessionId)}/terminal${cidQuery}`
+        : `/ws/sessions/${sessionId}/terminal${cidQuery}`;
+    const url = `${proto}//${location.host}${wsPath}`;
     const ws = new WebSocket(url);
     this._ws = ws;
     this._wsSessionId = sessionId;

@@ -25,6 +25,7 @@ import { findUser, setPassword, touchLastLogin, verifyPassword } from '../../use
 import { webviewCapabilities } from '../../webview-capabilities.js';
 import { capabilityFromProxyPath, capabilityFromReferer } from '../webview-proxy.js';
 import { ApiErrorCode, createErrorResponse, type AuthUser } from '../../types.js';
+import { verifyFederationBearer } from '../../federation/node-auth.js';
 
 // Request-scoped identity (multi-user). Single-user leaves it undefined and the
 // ownership helpers default to a synthetic admin (see route-helpers).
@@ -278,23 +279,25 @@ export function registerAuthMiddleware(app: FastifyInstance, https: boolean): Au
   const authUsername = process.env.CODEMAN_USERNAME || 'admin';
   const expectedHeader = 'Basic ' + Buffer.from(`${authUsername}:${authPassword}`).toString('base64');
 
-  app.addHook('onRequest', (req, reply, done) => {
+  app.addHook('onRequest', async (req, reply) => {
+    if (await verifyFederationBearer(req.headers.authorization)) {
+      req.authUser = { username: 'admin', role: 'admin' };
+      return;
+    }
+
     const bypass = checkHookSecretBypass(req, reply, hookSecretFailures);
     if (bypass === 'bypass') {
-      done();
       return;
     }
     if (bypass === 'rejected') return;
 
     // QR auth path — handled by the route itself (token validation + rate limiting)
     if (req.url?.startsWith('/q/')) {
-      done();
       return;
     }
 
     // Web-tab proxy, authenticated by the capability in the path, not the cookie.
     if (hasValidWebviewCapability(req)) {
-      done();
       return;
     }
 
@@ -313,7 +316,6 @@ export function registerAuthMiddleware(app: FastifyInstance, https: boolean): Au
         maxAge: AUTH_SESSION_TTL_MS / 1000, // seconds
         path: '/',
       });
-      done();
       return;
     }
 
@@ -348,7 +350,6 @@ export function registerAuthMiddleware(app: FastifyInstance, https: boolean): Au
         maxAge: AUTH_SESSION_TTL_MS / 1000, // seconds
         path: '/',
       });
-      done();
       return;
     }
 
@@ -422,6 +423,11 @@ function registerMultiUserAuthHook(
   };
 
   app.addHook('onRequest', async (req, reply) => {
+    if (await verifyFederationBearer(req.headers.authorization)) {
+      req.authUser = { username: 'admin', role: 'admin' };
+      return;
+    }
+
     const bypass = checkHookSecretBypass(req, reply, hookSecretFailures);
     if (bypass === 'bypass' || bypass === 'rejected') return;
 

@@ -803,6 +803,18 @@ program
 
 // ============ Web / daemon / service Commands ============
 
+const nodeCmd = program.command('node').description('Manage this Codeman node for dashboard federation');
+
+nodeCmd
+  .command('token')
+  .description('Create a dashboard bearer token for this node')
+  .option('--name <name>', 'Token label', 'dashboard')
+  .action(async (options) => {
+    const { createFederationToken } = await import('./federation/node-auth.js');
+    const token = await createFederationToken(options.name);
+    console.log(JSON.stringify(token, null, 2));
+  });
+
 /** Shared option set for the commands that can launch a web server. */
 function addWebLaunchOptions(cmd: Command): Command {
   return cmd
@@ -817,7 +829,8 @@ function addWebLaunchOptions(cmd: Command): Command {
     .option(
       '--multiuser',
       'Enable opt-in multi-user mode (named users in ~/.codeman/users.json; env: CODEMAN_MULTIUSER)'
-    );
+    )
+    .option('--headless', 'Start as an API/SSE/WebSocket-only node with no bundled web UI (env: CODEMAN_HEADLESS)');
 }
 
 /** Normalize commander's strings into the shape daemon-control/service-installer take. */
@@ -828,6 +841,7 @@ function toWebLaunchOptions(options: {
   titleHostname?: string;
   allowUnauthenticatedNetwork?: boolean;
   multiuser?: boolean;
+  headless?: boolean;
 }): WebLaunchOptions {
   const port = parseInt(options.port, 10);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
@@ -841,6 +855,7 @@ function toWebLaunchOptions(options: {
     titleHostname: options.titleHostname,
     allowUnauthenticatedNetwork: !!options.allowUnauthenticatedNetwork,
     multiuser: !!options.multiuser,
+    headless: !!options.headless || process.env.CODEMAN_HEADLESS === '1',
   };
 }
 
@@ -927,11 +942,25 @@ webCmd.action(async (options) => {
   const protocol = https ? 'https' : 'http';
   const displayHost = host === '0.0.0.0' ? 'localhost' : host;
 
-  console.log(chalk.cyan(`Starting Codeman web interface on ${displayHost}:${port}${https ? ' (HTTPS)' : ''}...`));
+  console.log(
+    chalk.cyan(
+      `Starting Codeman ${launch.headless ? 'headless node' : 'web interface'} on ${displayHost}:${port}${https ? ' (HTTPS)' : ''}...`
+    )
+  );
 
   try {
-    const server = await startWebServer(port, https, false, host, titleHostname, allowUnauthenticatedNetwork);
-    console.log(chalk.green(`\n✓ Web interface running at ${protocol}://${displayHost}:${port}`));
+    const server = await startWebServer(
+      port,
+      https,
+      false,
+      host,
+      titleHostname,
+      allowUnauthenticatedNetwork,
+      launch.headless ?? false
+    );
+    console.log(
+      chalk.green(`\n✓ ${launch.headless ? 'Headless node' : 'Web interface'} running at ${protocol}://${displayHost}:${port}`)
+    );
     if (https) {
       console.log(chalk.yellow('  Note: Accept the self-signed certificate in your browser on first visit'));
     }

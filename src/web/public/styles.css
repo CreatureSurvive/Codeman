@@ -1900,6 +1900,41 @@ html[data-line-anim="packet"] .connection-line.line-enter {
   transform: rotate(45deg);
 }
 
+.node-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.node-selector span {
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.node-selector select {
+  max-width: 130px;
+  min-width: 76px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.72rem;
+}
+
+.node-selector--remote {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.14);
+}
+
 /* Admin Panel header button: only shown to admins in multi-user mode (marker
    class removed by admin-ui.js after identity boot). Deliberately BIG and
    prominent: it is the entry point to user/permission management. */
@@ -4611,6 +4646,57 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   gap: 5px;
 }
 
+.node-settings-form {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.8fr) minmax(180px, 1.4fr) minmax(160px, 1.2fr) auto;
+  gap: 7px;
+  width: 100%;
+}
+
+.node-settings-list {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+}
+
+.node-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.node-settings-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.node-settings-name {
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 620;
+}
+
+.node-settings-url {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  overflow-wrap: anywhere;
+}
+
+.node-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
 #customRunActionModal .modal-content.modal-lg.custom-action-modal {
   max-width: min(620px, 94vw);
   width: min(620px, 94vw);
@@ -4895,6 +4981,27 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 }
 
 @media (max-width: 640px) {
+  .node-selector {
+    max-width: 120px;
+  }
+
+  .node-selector span {
+    display: none;
+  }
+
+  .node-selector select {
+    min-width: 0;
+    max-width: 104px;
+  }
+
+  .node-settings-form,
+  .node-settings-row,
+  .node-settings-actions {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
   .custom-action-env-menu {
     max-height: min(170px, 24vh);
   }

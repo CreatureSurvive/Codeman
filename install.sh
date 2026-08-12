@@ -25,6 +25,9 @@
 #                               front it with `tailscale serve` HTTPS (skips
 #                               the network prompt; never installs Tailscale
 #                               in non-interactive runs)
+#   CODEMAN_HEADLESS=1        - Install/run as an API-only remote node
+#   CODEMAN_NODE_NAME         - Friendly node name shown in dashboards
+#   CODEMAN_ENABLE_DISCOVERY=1 - Reserve discovery env for federation nodes
 #
 # Subcommands:
 #   install.sh update     - Update an existing install
@@ -45,6 +48,9 @@ MIN_NODE_VERSION=18
 TARGET_NODE_VERSION="${CODEMAN_NODE_VERSION:-22}"
 NONINTERACTIVE="${CODEMAN_NONINTERACTIVE:-0}"
 SKIP_SYSTEMD="${CODEMAN_SKIP_SYSTEMD:-0}"
+HEADLESS="${CODEMAN_HEADLESS:-0}"
+NODE_NAME="${CODEMAN_NODE_NAME:-}"
+ENABLE_DISCOVERY="${CODEMAN_ENABLE_DISCOVERY:-0}"
 
 # Network binding chosen during install (choose_network_binding). Empty
 # BIND_HOST means "not chosen" (e.g. the update path) and falls back to the
@@ -68,6 +74,48 @@ TAILSCALE_SERVE_URL=""
 # Set to 1 when serve commands must go through sudo because granting the user
 # tailscale "operator" rights failed (ensure_tailscale_operator).
 TS_NEED_ROOT="0"
+HEADLESS_PAIRING_PRINTED="0"
+
+web_arg_suffix() {
+    [[ "$HEADLESS" == "1" ]] && printf '%s' " --headless"
+}
+
+node_dashboard_url() {
+    local port="${CODEMAN_PORT:-3000}"
+    if [[ -n "$TAILSCALE_SERVE_URL" ]]; then
+        printf '%s' "$TAILSCALE_SERVE_URL"
+    elif [[ "$BIND_HOST" == "0.0.0.0" ]]; then
+        printf 'http://%s:%s' "$(detect_lan_ip)" "$port"
+    else
+        printf 'http://localhost:%s' "$port"
+    fi
+}
+
+print_headless_pairing_info() {
+    [[ "$HEADLESS" == "1" ]] || return 0
+    [[ "$HEADLESS_PAIRING_PRINTED" == "0" ]] || return 0
+    HEADLESS_PAIRING_PRINTED="1"
+
+    local token_json token url
+    token_json=$(node "$INSTALL_DIR/dist/index.js" node token --name dashboard 2>/dev/null || true)
+    token=$(printf '%s\n' "$token_json" | sed -n 's/.*"token": "\([^"]*\)".*/\1/p' | head -1)
+    url=$(node_dashboard_url)
+
+    echo ""
+    echo -e "  ${BOLD}Quick Connect this headless node:${NC}"
+    echo ""
+    echo -e "    ${BOLD}Name:${NC}  ${NODE_NAME:-$(hostname)}"
+    echo -e "    ${BOLD}URL:${NC}   ${CYAN}$url${NC}"
+    if [[ -n "$token" ]]; then
+        echo -e "    ${BOLD}Token:${NC} ${CYAN}$token${NC}"
+        echo ""
+        echo -e "  ${DIM}In your dashboard, open Settings → System → Nodes and paste these values.${NC}"
+    else
+        echo -e "    ${CYAN}codeman node token --name dashboard${NC}"
+        echo ""
+        echo -e "  ${YELLOW}Could not generate a token automatically; run the command above on this node.${NC}"
+    fi
+}
 
 # puppeteer is a devDependency used only by scripts/browser-comparison.mjs — its
 # ~150MB chrome-headless-shell download is never needed to build or run Codeman.
@@ -1768,6 +1816,21 @@ setup_launchd_service() {
     <string>1</string>"
         fi
     fi
+    local node_plist=""
+    if [[ "$HEADLESS" == "1" ]]; then
+        node_plist="    <key>CODEMAN_HEADLESS</key>
+    <string>1</string>"
+        if [[ -n "$NODE_NAME" ]]; then
+            node_plist+=$'\n'"    <key>CODEMAN_NODE_NAME</key>
+    <string>$(xml_escape "$NODE_NAME")</string>"
+        fi
+        if [[ "$ENABLE_DISCOVERY" == "1" ]]; then
+            node_plist+=$'\n'"    <key>CODEMAN_ENABLE_DISCOVERY</key>
+    <string>1</string>"
+        fi
+    fi
+    local headless_arg=""
+    [[ "$HEADLESS" == "1" ]] && headless_arg=$'    <string>--headless</string>'
 
     cat > "$agent_plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1781,6 +1844,7 @@ setup_launchd_service() {
     <string>$node_path</string>
     <string>$INSTALL_DIR/dist/index.js</string>
     <string>web</string>
+$headless_arg
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -1791,6 +1855,7 @@ setup_launchd_service() {
     <key>LANG</key>
     <string>en_US.UTF-8</string>
 $bind_plist
+$node_plist
   </dict>
   <key>WorkingDirectory</key>
   <string>$HOME</string>
@@ -1844,6 +1909,18 @@ setup_systemd_service() {
             bind_env+=$'\n'"Environment=CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1"
         fi
     fi
+    local node_env=""
+    local headless_arg=""
+    if [[ "$HEADLESS" == "1" ]]; then
+        headless_arg=" --headless"
+        node_env="Environment=CODEMAN_HEADLESS=1"
+        if [[ -n "$NODE_NAME" ]]; then
+            node_env+=$'\n'"Environment=\"CODEMAN_NODE_NAME=$(systemd_env_escape "$NODE_NAME")\""
+        fi
+        if [[ "$ENABLE_DISCOVERY" == "1" ]]; then
+            node_env+=$'\n'"Environment=CODEMAN_ENABLE_DISCOVERY=1"
+        fi
+    fi
 
     # Create service file
     cat > "$service_file" << EOF
@@ -1853,13 +1930,14 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$node_path $INSTALL_DIR/dist/index.js web
+ExecStart=$node_path $INSTALL_DIR/dist/index.js web$headless_arg
 WorkingDirectory=$HOME
 Restart=always
 RestartSec=10
 Environment=NODE_ENV=production
 Environment=PATH=$PATH
 $bind_env
+$node_env
 
 [Install]
 WantedBy=default.target
@@ -2233,6 +2311,21 @@ main() {
 
     # Ask how the dashboard should be reachable BEFORE the launch menu, so the
     # service files and the run-now path all inherit the choice.
+    if [[ "${CODEMAN_HEADLESS:-}" == "1" ]]; then
+        HEADLESS="1"
+        info "Headless node mode preset via CODEMAN_HEADLESS=1"
+    elif [[ "$NONINTERACTIVE" != "1" ]] && has_tty; then
+        if prompt_yes_no "Install this machine as a headless remote node? (no bundled web UI)" "n"; then
+            HEADLESS="1"
+        fi
+    fi
+
+    if [[ "$HEADLESS" == "1" && -z "$NODE_NAME" ]] && [[ "$NONINTERACTIVE" != "1" ]] && has_tty; then
+        echo -en "${CYAN}Node name [$(hostname)]:${NC} " >&2
+        read_reply NODE_NAME || NODE_NAME=""
+        NODE_NAME="${NODE_NAME:-$(hostname)}"
+    fi
+
     choose_network_binding
     echo ""
 
@@ -2261,7 +2354,7 @@ main() {
 
         if [[ "$NONINTERACTIVE" == "1" ]] || ! has_tty; then
             launch_choice="3"
-            info "No interactive terminal detected: not starting (run 'codeman web' when ready)"
+            info "No interactive terminal detected: not starting (run 'codeman web$(web_arg_suffix)' when ready)"
         else
             while true; do
                 echo -en "${CYAN}Choose [1/2/3]:${NC} " >&2
@@ -2282,7 +2375,7 @@ main() {
 
         if [[ "$NONINTERACTIVE" == "1" ]] || ! has_tty; then
             launch_choice="2"
-            info "No interactive terminal detected: not starting (run 'codeman web' when ready)"
+            info "No interactive terminal detected: not starting (run 'codeman web$(web_arg_suffix)' when ready)"
         else
             while true; do
                 echo -en "${CYAN}Choose [1/2]:${NC} " >&2
@@ -2340,8 +2433,9 @@ main() {
             fi
         else
             echo -e "  ${YELLOW}${BOLD}The service was set up but is not running yet${NC} (see warnings above)."
-            echo -e "  ${DIM}You can always run it directly:${NC} ${CYAN}codeman web${NC}"
+            echo -e "  ${DIM}You can always run it directly:${NC} ${CYAN}codeman web$(web_arg_suffix)${NC}"
         fi
+        print_headless_pairing_info
         echo ""
         echo -e "  ${BOLD}Manage the service:${NC}"
         echo ""
@@ -2364,17 +2458,17 @@ main() {
         echo ""
         if [[ "$BIND_HOST" == "0.0.0.0" ]]; then
             if [[ -n "$BIND_PASSWORD" ]]; then
-                echo -e "    ${CYAN}CODEMAN_HOST=0.0.0.0 CODEMAN_PASSWORD='<your-password>' codeman web${NC}"
+                echo -e "    ${CYAN}CODEMAN_HOST=0.0.0.0 CODEMAN_PASSWORD='<your-password>' codeman web$(web_arg_suffix)${NC}"
             else
-                echo -e "    ${CYAN}CODEMAN_HOST=0.0.0.0 codeman web${NC}"
+                echo -e "    ${CYAN}CODEMAN_HOST=0.0.0.0 codeman web$(web_arg_suffix)${NC}"
             fi
             echo -e "    ${DIM}(a bare 'codeman web' binds 127.0.0.1, this machine only)${NC}"
             echo ""
             echo -e "    ${CYAN}# Open in browser${NC}"
             echo -e "    http://$(detect_lan_ip):3000   ${DIM}(any device on your network)${NC}"
         else
-            echo -e "    ${CYAN}codeman web${NC}            # Start the web server"
-            echo -e "    ${CYAN}codeman web --https${NC}    # With HTTPS (for remote access)"
+            echo -e "    ${CYAN}codeman web$(web_arg_suffix)${NC}            # Start Codeman"
+            echo -e "    ${CYAN}codeman web --https$(web_arg_suffix)${NC}    # With HTTPS (for remote access)"
             echo ""
             echo -e "    ${CYAN}# Open in browser${NC}"
             echo -e "    http://localhost:3000"
@@ -2382,6 +2476,7 @@ main() {
                 echo -e "    $TAILSCALE_SERVE_URL   ${DIM}(any device on your tailnet, once running)${NC}"
             fi
         fi
+        print_headless_pairing_info
         echo ""
     fi
 
@@ -2442,6 +2537,12 @@ main() {
             export CODEMAN_HOST="$BIND_HOST"
             [[ -n "$BIND_PASSWORD" ]] && export CODEMAN_PASSWORD="$BIND_PASSWORD"
             [[ "$BIND_ACK" == "1" ]] && export CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK=1
+        fi
+        [[ "$HEADLESS" == "1" ]] && export CODEMAN_HEADLESS=1
+        [[ -n "$NODE_NAME" ]] && export CODEMAN_NODE_NAME="$NODE_NAME"
+        [[ "$ENABLE_DISCOVERY" == "1" ]] && export CODEMAN_ENABLE_DISCOVERY=1
+        if [[ "$HEADLESS" == "1" ]]; then
+            exec node "$INSTALL_DIR/dist/index.js" web --headless
         fi
         exec node "$INSTALL_DIR/dist/index.js" web
     fi

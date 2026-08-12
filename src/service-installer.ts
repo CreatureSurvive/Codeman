@@ -139,6 +139,9 @@ export function buildServiceEnv(
     LANG: lang || 'en_US.UTF-8',
   };
   if (CODEMAN_INSTANCE) env.CODEMAN_INSTANCE = CODEMAN_INSTANCE;
+  if (process.env.CODEMAN_NODE_NAME) env.CODEMAN_NODE_NAME = process.env.CODEMAN_NODE_NAME;
+  if (process.env.CODEMAN_ENABLE_DISCOVERY === '1') env.CODEMAN_ENABLE_DISCOVERY = '1';
+  if (process.env.CODEMAN_HEADLESS === '1') env.CODEMAN_HEADLESS = '1';
   return env;
 }
 

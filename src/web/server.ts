@@ -169,6 +169,7 @@ import {
   registerVoiceRoutes,
   registerWebviewRoutes,
   tryWebviewRefererFallback,
+  registerNodeRoutes,
 } from './routes/index.js';
 import { CronService } from '../cron/cron-service.js';
 
@@ -300,6 +301,7 @@ export class WebServer extends EventEmitter {
   private windowTitle: string;
   private readonly indexHtmlTemplate: string;
   private readonly allowUnauthenticatedNetwork: boolean;
+  private readonly headless: boolean;
   private _pasteImageGcStop: (() => void) | null = null;
   private _eventLoopMonitor: EventLoopMonitorHandle | null = null;
   /** Opt-in hooks-only listener on the docker bridge gateway (CODEMAN_DOCKER_BRIDGE_HOOKS). */
@@ -316,7 +318,8 @@ export class WebServer extends EventEmitter {
     testMode: boolean = false,
     host: string = '127.0.0.1',
     titleHostname?: string,
-    allowUnauthenticatedNetwork: boolean = false
+    allowUnauthenticatedNetwork: boolean = false,
+    headless: boolean = false
   ) {
     super();
     this.setMaxListeners(0);
@@ -326,6 +329,7 @@ export class WebServer extends EventEmitter {
     this.testMode = testMode;
     this.allowUnauthenticatedNetwork =
       allowUnauthenticatedNetwork || isExplicitlyEnabled(process.env.CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK);
+    this.headless = headless || isExplicitlyEnabled(process.env.CODEMAN_HEADLESS);
     this.titleHostname = titleHostname || getHostname();
     this.windowTitle = `codeman:${this.titleHostname}`;
     this.indexHtmlTemplate = readFileSync(join(__dirname, 'public', 'index.html'), 'utf-8');
@@ -742,59 +746,61 @@ export class WebServer extends EventEmitter {
 
     // Security headers + CORS
     registerSecurityHeaders(this.app, this.https);
-    this.app.get('/', async (_req, reply) => {
-      return reply
-        .header('Cache-Control', 'no-cache')
-        .type('text/html; charset=utf-8')
-        .send(await this.renderIndexHtml());
-    });
-    this.app.get('/index.html', async (_req, reply) => {
-      return reply
-        .header('Cache-Control', 'no-cache')
-        .type('text/html; charset=utf-8')
-        .send(await this.renderIndexHtml());
-    });
-    // Detached single-session window (undock). Serves the same SPA shell but
-    // flags the client into "solo mode" for one session. Auth applies normally
-    // (the popup carries the dashboard's cookie on navigation). We serve 200
-    // even for an unknown id — the client renders a friendly "session
-    // unavailable" state, which also covers a session that ends while its
-    // detached window is still open. Registered before the static plugin so the
-    // explicit route wins over the '/' static prefix.
-    this.app.get('/session/:id', async (req, reply) => {
-      const { id } = req.params as { id: string };
-      return reply
-        .header('Cache-Control', 'no-cache')
-        .type('text/html; charset=utf-8')
-        .send(await this.renderIndexHtml(id));
-    });
-    // Service worker must never be cached — browsers check for SW updates on navigation
-    this.app.get('/sw.js', async (_req, reply) => {
-      return reply
-        .header('Cache-Control', 'no-cache, no-store')
-        .header('Service-Worker-Allowed', '/')
-        .type('application/javascript')
-        .sendFile('sw.js', join(__dirname, 'public'));
-    });
+    if (!this.headless) {
+      this.app.get('/', async (_req, reply) => {
+        return reply
+          .header('Cache-Control', 'no-cache')
+          .type('text/html; charset=utf-8')
+          .send(await this.renderIndexHtml());
+      });
+      this.app.get('/index.html', async (_req, reply) => {
+        return reply
+          .header('Cache-Control', 'no-cache')
+          .type('text/html; charset=utf-8')
+          .send(await this.renderIndexHtml());
+      });
+      // Detached single-session window (undock). Serves the same SPA shell but
+      // flags the client into "solo mode" for one session. Auth applies normally
+      // (the popup carries the dashboard's cookie on navigation). We serve 200
+      // even for an unknown id — the client renders a friendly "session
+      // unavailable" state, which also covers a session that ends while its
+      // detached window is still open. Registered before the static plugin so the
+      // explicit route wins over the '/' static prefix.
+      this.app.get('/session/:id', async (req, reply) => {
+        const { id } = req.params as { id: string };
+        return reply
+          .header('Cache-Control', 'no-cache')
+          .type('text/html; charset=utf-8')
+          .send(await this.renderIndexHtml(id));
+      });
+      // Service worker must never be cached — browsers check for SW updates on navigation
+      this.app.get('/sw.js', async (_req, reply) => {
+        return reply
+          .header('Cache-Control', 'no-cache, no-store')
+          .header('Service-Worker-Allowed', '/')
+          .type('application/javascript')
+          .sendFile('sw.js', join(__dirname, 'public'));
+      });
 
-    // Serve static files — content-hashed assets (e.g. app.a3f8c2e1.js) are immutable, cache aggressively.
-    // HTML must revalidate every time so browsers pick up new hashed filenames after deploys.
-    // cacheControl disabled so setHeaders has full control (fastify-static's reply.headers() overwrites setHeaders otherwise).
-    // preCompressed: serve pre-built .br/.gz files (from build step) to avoid per-request CPU compression
-    await this.app.register(fastifyStatic, {
-      root: join(__dirname, 'public'),
-      prefix: '/',
-      cacheControl: false,
-      preCompressed: true,
-      setHeaders: (res, path) => {
-        // Use .includes() not .endsWith() — preCompressed serves .html.br/.html.gz
-        if (path.includes('.html')) {
-          res.setHeader('Cache-Control', 'no-cache');
-        } else {
-          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        }
-      },
-    });
+      // Serve static files — content-hashed assets (e.g. app.a3f8c2e1.js) are immutable, cache aggressively.
+      // HTML must revalidate every time so browsers pick up new hashed filenames after deploys.
+      // cacheControl disabled so setHeaders has full control (fastify-static's reply.headers() overwrites setHeaders otherwise).
+      // preCompressed: serve pre-built .br/.gz files (from build step) to avoid per-request CPU compression
+      await this.app.register(fastifyStatic, {
+        root: join(__dirname, 'public'),
+        prefix: '/',
+        cacheControl: false,
+        preCompressed: true,
+        setHeaders: (res, path) => {
+          // Use .includes() not .endsWith() — preCompressed serves .html.br/.html.gz
+          if (path.includes('.html')) {
+            res.setHeader('Cache-Control', 'no-cache');
+          } else {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      });
+    }
 
     // SSE endpoint for real-time updates
     this.app.get('/api/events', (req, reply) => {
@@ -976,6 +982,12 @@ export class WebServer extends EventEmitter {
     registerAdminRoutes(this.app, ctx);
     registerOrchestratorRoutes(this.app, ctx);
     registerWebviewRoutes(this.app, ctx);
+    registerNodeRoutes(this.app, {
+      headless: this.headless,
+      port: this.port,
+      https: this.https,
+      host: this.host,
+    });
 
     // Cron: build the service from the same context, recompute
     // due times for any persisted jobs, then expose it to its routes.
@@ -2360,7 +2372,7 @@ export class WebServer extends EventEmitter {
     await this.app.listen({ port: this.port, host: this.host });
     const protocol = this.https ? 'https' : 'http';
     const displayHost = this.host === '0.0.0.0' ? 'localhost' : this.host;
-    console.log(`Codeman web interface running at ${protocol}://${displayHost}:${this.port}`);
+    console.log(`Codeman ${this.headless ? 'headless node' : 'web interface'} running at ${protocol}://${displayHost}:${this.port}`);
 
     // Opt-in: also serve the HOOK endpoints on the docker bridge gateway so
     // in-container hooks (permission/idle/stop callbacks) can reach a loopback-bound
@@ -3113,9 +3125,10 @@ export async function startWebServer(
   testMode: boolean = false,
   host: string = '127.0.0.1',
   titleHostname?: string,
-  allowUnauthenticatedNetwork: boolean = false
+  allowUnauthenticatedNetwork: boolean = false,
+  headless: boolean = false
 ): Promise<WebServer> {
-  const server = new WebServer(port, https, testMode, host, titleHostname, allowUnauthenticatedNetwork);
+  const server = new WebServer(port, https, testMode, host, titleHostname, allowUnauthenticatedNetwork, headless);
   await server.start();
   return server;
 }

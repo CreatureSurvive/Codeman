@@ -14,6 +14,198 @@
 // Loaded after app.js (needs CodemanApp class defined)
 
 Object.assign(CodemanApp.prototype, {
+  _shouldProxyNodePath(path) {
+    if (!this.currentNodeId || this.currentNodeId === 'local') return false;
+    if (typeof path !== 'string' || !path.startsWith('/api/')) return false;
+    return [
+      '/api/status',
+      '/api/events',
+      '/api/cases',
+      '/api/quick-start',
+      '/api/sessions',
+      '/api/opencode',
+      '/api/codex',
+      '/api/gemini',
+      '/api/antigravity',
+      '/api/remote-hosts',
+      '/api/docker-hosts',
+      '/api/docker-cases',
+      '/api/docker-exports',
+    ].some((prefix) => path === prefix || path.startsWith(prefix + '/') || path.startsWith(prefix + '?'));
+  },
+
+  _nodeApiPath(path) {
+    if (!this._shouldProxyNodePath(path)) return path;
+    return `/api/nodes/${encodeURIComponent(this.currentNodeId)}/proxy${path}`;
+  },
+
+  _installNodeFetchProxy() {
+    if (window.__codemanNodeFetchProxyInstalled) return;
+    window.__codemanNodeFetchProxyInstalled = true;
+    window.__codemanNativeFetch = window.fetch.bind(window);
+    window.fetch = (resource, init) => {
+      try {
+        const app = window.app;
+        if (!app || !app._nodeApiPath) return window.__codemanNativeFetch(resource, init);
+        if (typeof resource === 'string') {
+          return window.__codemanNativeFetch(app._nodeApiPath(resource), init);
+        }
+        if (resource instanceof URL && resource.origin === location.origin) {
+          const next = new URL(app._nodeApiPath(resource.pathname + resource.search), location.origin);
+          return window.__codemanNativeFetch(next, init);
+        }
+        if (resource instanceof Request && resource.url.startsWith(location.origin + '/api/')) {
+          const url = new URL(resource.url);
+          const next = new Request(app._nodeApiPath(url.pathname + url.search), resource);
+          return window.__codemanNativeFetch(next, init);
+        }
+      } catch {
+        /* fall through to native fetch */
+      }
+      return window.__codemanNativeFetch(resource, init);
+    };
+  },
+
+  async loadFederationNodes() {
+    const res = await (window.__codemanNativeFetch || fetch)('/api/nodes').catch(() => null);
+    if (!res || !res.ok) return;
+    const body = await res.json().catch(() => null);
+    const data = body?.success === true ? body.data : body;
+    const local = data?.local ? [{ ...data.local, id: 'local' }] : [{ id: 'local', name: 'Local', enabled: true }];
+    this.nodes = [...local, ...(Array.isArray(data?.nodes) ? data.nodes : [])];
+    if (!this.nodes.some((node) => node.id === this.currentNodeId && node.enabled !== false))
+      this.currentNodeId = 'local';
+    this.renderNodeSelector?.();
+    this.renderFederationNodes?.();
+  },
+
+  renderNodeSelector() {
+    const select = document.getElementById('nodeSelector');
+    if (!select) return;
+    select.replaceChildren();
+    for (const node of this.nodes.length ? this.nodes : [{ id: 'local', name: 'Local' }]) {
+      const option = document.createElement('option');
+      option.value = node.id;
+      option.textContent =
+        node.id === 'local' ? `${node.name || 'Local'} (local)` : node.name || node.baseUrl || node.id;
+      option.disabled = node.enabled === false;
+      select.appendChild(option);
+    }
+    select.value = this.currentNodeId || 'local';
+    select.parentElement?.classList.toggle('node-selector--remote', select.value !== 'local');
+  },
+
+  async setCurrentNode(nodeId) {
+    const next = nodeId || 'local';
+    if (next === this.currentNodeId) return;
+    this.currentNodeId = next;
+    try {
+      localStorage.setItem('codeman-current-node', next);
+    } catch {}
+    this.renderNodeSelector?.();
+    this._disconnectWs?.();
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+    this.sessions.clear();
+    this.sessionOrder = [];
+    this.activeSessionId = null;
+    this.renderSessionTabs?.();
+    this.connectSSE?.();
+    await this.loadState?.();
+    this.loadQuickStartCases?.();
+  },
+
+  async saveFederationNodeFromSettings() {
+    const name = document.getElementById('nodeNameInput')?.value.trim() || '';
+    const baseUrl = document.getElementById('nodeUrlInput')?.value.trim() || '';
+    const token = document.getElementById('nodeTokenInput')?.value.trim() || '';
+    if (!name || !baseUrl) {
+      this.showToast?.('Node needs a name and URL', 'error');
+      return;
+    }
+    const res = await (window.__codemanNativeFetch || fetch)('/api/nodes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, baseUrl, token }),
+    }).catch(() => null);
+    if (!res || !res.ok) {
+      this.showToast?.('Could not save node', 'error');
+      return;
+    }
+    ['nodeNameInput', 'nodeUrlInput', 'nodeTokenInput'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    await this.loadFederationNodes();
+    this.showToast?.('Node saved', 'success');
+  },
+
+  async testFederationNode(nodeId) {
+    const res = await (window.__codemanNativeFetch || fetch)(`/api/nodes/${encodeURIComponent(nodeId)}/test`, {
+      method: 'POST',
+    }).catch(() => null);
+    const body = await res?.json?.().catch(() => null);
+    await this.loadFederationNodes();
+    const ok = (body?.success === true ? body.data : body)?.ok === true;
+    this.showToast?.(ok ? 'Node is reachable' : 'Node check failed', ok ? 'success' : 'error');
+  },
+
+  async removeFederationNode(nodeId) {
+    await (window.__codemanNativeFetch || fetch)(`/api/nodes/${encodeURIComponent(nodeId)}`, {
+      method: 'DELETE',
+    }).catch(() => null);
+    if (this.currentNodeId === nodeId) await this.setCurrentNode('local');
+    await this.loadFederationNodes();
+  },
+
+  renderFederationNodes() {
+    const list = document.getElementById('appSettingsNodesList');
+    if (!list) return;
+    const remoteNodes = (this.nodes || []).filter((node) => node.id !== 'local');
+    if (remoteNodes.length === 0) {
+      list.innerHTML = '<div class="set-empty">No remote nodes yet.</div>';
+      return;
+    }
+    list.replaceChildren();
+    for (const node of remoteNodes) {
+      const row = document.createElement('div');
+      row.className = 'node-settings-row';
+      const text = document.createElement('div');
+      text.className = 'node-settings-text';
+      const name = document.createElement('span');
+      name.className = 'node-settings-name';
+      name.textContent = node.name || node.id;
+      const url = document.createElement('span');
+      url.className = 'node-settings-url';
+      const status = node.lastHealth?.ok === true ? 'online' : node.lastHealth?.ok === false ? 'offline' : 'unchecked';
+      url.textContent = `${node.baseUrl} · ${status}`;
+      text.append(name, url);
+
+      const actions = document.createElement('div');
+      actions.className = 'node-settings-actions';
+      const select = document.createElement('button');
+      select.type = 'button';
+      select.className = 'btn-toolbar btn-sm';
+      select.textContent = 'Use';
+      select.addEventListener('click', () => this.setCurrentNode(node.id));
+      const test = document.createElement('button');
+      test.type = 'button';
+      test.className = 'btn-toolbar btn-sm';
+      test.textContent = 'Test';
+      test.addEventListener('click', () => this.testFederationNode(node.id));
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'btn-toolbar btn-sm';
+      remove.textContent = 'Remove';
+      remove.addEventListener('click', () => this.removeFederationNode(node.id));
+      actions.append(select, test, remove);
+      row.append(text, actions);
+      list.appendChild(row);
+    }
+  },
+
   /**
    * Send a JSON API request. Handles Content-Type, JSON serialization, and error swallowing.
    * @param {string} path - API path (e.g., '/api/sessions/123/input')
@@ -28,7 +220,7 @@ Object.assign(CodemanApp.prototype, {
       fetchOpts.body = JSON.stringify(body);
     }
     try {
-      const res = await fetch(path, fetchOpts);
+      const res = await fetch(this._nodeApiPath(path), fetchOpts);
       return res;
     } catch {
       return null;
