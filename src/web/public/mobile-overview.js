@@ -486,8 +486,12 @@ Object.assign(CodemanApp.prototype, {
     group.className = 'mobile-overview-run-group';
 
     const mode = this.runMode || 'claude';
+    const customAction = mode.startsWith('custom:')
+      ? this.getCustomRunActions?.().find((action) => action.id === mode.slice('custom:'.length))
+      : null;
+    const modeClass = customAction ? 'custom' : mode;
     const run = document.createElement('button');
-    run.className = `btn-toolbar btn-run mode-${mode} mobile-overview-run`;
+    run.className = `btn-toolbar btn-run mode-${modeClass} mobile-overview-run`;
     run.type = 'button';
     run.dataset.moAction = 'run';
     const runLabel = document.createElement('span');
@@ -496,12 +500,14 @@ Object.assign(CodemanApp.prototype, {
     const runMode = document.createElement('span');
     runMode.className = 'mobile-overview-run-mode';
     runMode.setAttribute('data-i18n-skip', '');
-    runMode.textContent = MOBILE_OVERVIEW_RUN_MODES.find((m) => m.mode === mode)?.short || mode;
+    runMode.textContent = customAction
+      ? customAction.label.slice(0, 12)
+      : MOBILE_OVERVIEW_RUN_MODES.find((m) => m.mode === mode)?.short || mode;
     run.appendChild(runMode);
     group.appendChild(run);
 
     const caret = document.createElement('button');
-    caret.className = `btn-toolbar btn-run-gear mode-${mode} mobile-overview-run-caret`;
+    caret.className = `btn-toolbar btn-run-gear mode-${modeClass} mobile-overview-run-caret`;
     caret.type = 'button';
     caret.dataset.moAction = 'run-menu';
     caret.setAttribute('aria-label', 'Choose what to run');
@@ -566,6 +572,30 @@ Object.assign(CodemanApp.prototype, {
       label.textContent = entry.label;
       option.appendChild(label);
       menu.appendChild(option);
+    }
+
+    const customActions = this.getCustomRunActions?.() || [];
+    if (customActions.length > 0) {
+      const header = document.createElement('div');
+      header.className = 'mobile-overview-run-header';
+      header.textContent = 'Custom Actions';
+      menu.appendChild(header);
+
+      for (const action of customActions) {
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'mobile-overview-run-option' + (`custom:${action.id}` === current ? ' selected' : '');
+        option.dataset.moAction = 'run-mode';
+        option.dataset.moMode = `custom:${action.id}`;
+        const dot = document.createElement('span');
+        dot.className = 'run-mode-dot custom';
+        dot.setAttribute('aria-hidden', 'true');
+        option.appendChild(dot);
+        const label = document.createElement('span');
+        label.textContent = action.label;
+        option.appendChild(label);
+        menu.appendChild(option);
+      }
     }
 
     const header = document.createElement('div');

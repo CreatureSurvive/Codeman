@@ -51,7 +51,12 @@ function outboundHeaders(nodeToken?: string): Headers {
   return headers;
 }
 
-async function proxyFetch(req: FastifyRequest, reply: FastifyReply, nodeId: string, upstreamPath: string): Promise<void> {
+async function proxyFetch(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  nodeId: string,
+  upstreamPath: string
+): Promise<void> {
   const node = await getNode(nodeId);
   if (!node || !node.enabled) {
     reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Node not found'));
@@ -60,9 +65,13 @@ async function proxyFetch(req: FastifyRequest, reply: FastifyReply, nodeId: stri
   const url = new URL(upstreamPath, node.baseUrl);
   const headers = outboundHeaders(node.token);
   const requestHeaders = req.headers as Record<string, string | string[] | undefined>;
-  if (requestHeaders.accept) headers.set('Accept', Array.isArray(requestHeaders.accept) ? requestHeaders.accept[0] : requestHeaders.accept);
+  if (requestHeaders.accept)
+    headers.set('Accept', Array.isArray(requestHeaders.accept) ? requestHeaders.accept[0] : requestHeaders.accept);
   if (requestHeaders['content-type'] && req.body !== undefined) {
-    headers.set('Content-Type', Array.isArray(requestHeaders['content-type']) ? requestHeaders['content-type'][0] : requestHeaders['content-type']);
+    headers.set(
+      'Content-Type',
+      Array.isArray(requestHeaders['content-type']) ? requestHeaders['content-type'][0] : requestHeaders['content-type']
+    );
   }
 
   let body: string | Buffer | undefined;
@@ -71,11 +80,8 @@ async function proxyFetch(req: FastifyRequest, reply: FastifyReply, nodeId: stri
     if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   }
 
-  const abort = new AbortController();
-  req.raw.on('close', () => abort.abort());
-
   try {
-    const upstream = await fetch(url, { method: req.method, headers, body, signal: abort.signal });
+    const upstream = await fetch(url, { method: req.method, headers, body });
     reply.code(upstream.status);
     upstream.headers.forEach((value, key) => {
       const lower = key.toLowerCase();
@@ -110,7 +116,6 @@ async function proxyFetch(req: FastifyRequest, reply: FastifyReply, nodeId: stri
     }
     reply.send(Buffer.from(await upstream.arrayBuffer()));
   } catch (err) {
-    if (abort.signal.aborted) return;
     const message = err instanceof Error ? err.message : 'Could not reach node';
     reply.code(502).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, message));
   }
@@ -197,7 +202,8 @@ export function registerNodeRoutes(app: FastifyInstance, options: NodeRouteOptio
     const body = (req.body || {}) as { code?: string; name?: string };
     if (!body.code) return reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'code required'));
     const token = await claimPairingCode(body.code, body.name);
-    if (!token) return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Pairing code expired or invalid'));
+    if (!token)
+      return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, 'Pairing code expired or invalid'));
     return {
       ...token,
       nodeName: process.env.CODEMAN_NODE_NAME || hostname(),
@@ -293,9 +299,12 @@ export function registerNodeRoutes(app: FastifyInstance, options: NodeRouteOptio
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ code: body.code, name: body.name || 'dashboard' }),
       });
-      const claimed = (await responseJson(res)) as
-        | { success?: boolean; data?: { token?: string; nodeName?: string }; token?: string; nodeName?: string }
-        | null;
+      const claimed = (await responseJson(res)) as {
+        success?: boolean;
+        data?: { token?: string; nodeName?: string };
+        token?: string;
+        nodeName?: string;
+      } | null;
       const data = claimed?.success === true ? claimed.data : claimed;
       if (!res.ok || !data?.token) {
         return reply.code(502).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Pairing failed'));
@@ -304,11 +313,13 @@ export function registerNodeRoutes(app: FastifyInstance, options: NodeRouteOptio
     } catch (err) {
       return reply
         .code(502)
-        .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, err instanceof Error ? err.message : 'Pairing failed'));
+        .send(
+          createErrorResponse(ApiErrorCode.OPERATION_FAILED, err instanceof Error ? err.message : 'Pairing failed')
+        );
     }
   });
 
-  app.all('/api/nodes/:nodeId/proxy/*', async (req, reply) => {
+  app.all('/api/nodes/:nodeId/proxy/*', { compress: false }, async (req, reply) => {
     if (!requireAdmin(req, reply)) return;
     const params = req.params as { nodeId: string; '*': string };
     const query = req.url.includes('?') ? `?${req.url.split('?').slice(1).join('?')}` : '';

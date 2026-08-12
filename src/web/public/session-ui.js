@@ -1140,19 +1140,71 @@ Object.assign(CodemanApp.prototype, {
     this.terminal.focus();
 
     try {
-      const res = await fetch('/api/quick-start', {
+      const launchesOnRemoteNode = this.currentNodeId && this.currentNodeId !== 'local';
+      const envOverrides = {};
+      for (const entry of Array.isArray(action.env) ? action.env : []) {
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(entry.key || '')) {
+          envOverrides[entry.key] = entry.value || '';
+        }
+      }
+      const hasEnvOverrides = Object.keys(envOverrides).length > 0;
+      const sessionName = `x${this._nextCaseSessionStartNumber(caseName, 'x')}-${caseName}`;
+      const launchPayload = {
+        caseName,
+        mode: 'shell',
+        launchCommand: action.command,
+        ...(hasEnvOverrides ? { envOverrides } : {}),
+        sessionName,
+      };
+      const fallbackPayload = {
+        caseName,
+        mode: 'shell',
+        launchCommand: this.buildCustomActionLaunchCommand(action),
+        sessionName,
+      };
+      let res = await fetch('/api/quick-start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'shell',
-          launchCommand: this.buildCustomActionLaunchCommand(action),
-          sessionName: `x${this._nextCaseSessionStartNumber(caseName, 'x')}-${caseName}`,
-        })
+        body: JSON.stringify(launchPayload)
       });
-      const data = await res.json();
+      let data = await res.json();
+      const hasSensitiveEnv = Object.keys(envOverrides).some(key => /(?:TOKEN|KEY|SECRET|PASSWORD|AUTH)/i.test(key));
+      const envRejected =
+        data?.success === false &&
+        /envOverrides|environment|disallowed|not supported/i.test(data.error || '');
+      if (launchesOnRemoteNode && hasEnvOverrides && hasSensitiveEnv && envRejected) {
+        throw new Error(
+          `${action.label} needs hidden environment support on the selected node. Update Codeman on that node, then start the action again.`
+        );
+      }
+      const canRetryInline =
+        launchesOnRemoteNode &&
+        hasEnvOverrides &&
+        !hasSensitiveEnv &&
+        envRejected;
+      if (canRetryInline) {
+        res = await fetch('/api/quick-start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(fallbackPayload)
+        });
+        data = await res.json();
+      }
       if (!data.success) throw new Error(data.error || `Failed to start ${action.label}`);
+      const inferredBackend = hasEnvOverrides
+        ? this._inferBackendFromText?.(Object.entries(envOverrides).map(([key, value]) => `${key}=${value}`).join('\n'))
+        : null;
+      if (inferredBackend && data.data?.session && !data.data.session.backend) {
+        data.data.session.backend = inferredBackend;
+      }
       await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+      if (inferredBackend && data.data?.sessionId) {
+        const session = this.sessions?.get(data.data.sessionId);
+        if (session && !session.backend) {
+          session.backend = inferredBackend;
+          this.renderTabs?.();
+        }
+      }
       if (data.data.sessionId) await this.selectSession(data.data.sessionId);
       this.terminal.focus();
     } catch (err) {

@@ -80,6 +80,8 @@ export interface CreateSessionOptions {
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (e.g., CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS). Ephemeral — not written to disk. */
   envOverrides?: Record<string, string>;
+  /** Optional shell command to run as the pane's initial process instead of typing it after startup. */
+  launchCommand?: string;
   /** Claude CLI effort level, injected as a `--settings` soft default (overridable via /effort in-session) */
   effort?: EffortLevel;
   /** tmux history-limit (scrollback lines) to set for this session. */
@@ -111,6 +113,8 @@ export interface RespawnPaneOptions {
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (preserved across respawns). */
   envOverrides?: Record<string, string>;
+  /** Optional shell command to run as the pane's initial process instead of typing it after startup. */
+  launchCommand?: string;
   /** Claude CLI effort level (preserved across respawns, injected via `--settings`) */
   effort?: EffortLevel;
   /** tmux history-limit (scrollback lines) to set for this session after respawn. */

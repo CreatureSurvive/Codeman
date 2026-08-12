@@ -652,14 +652,7 @@ Object.assign(CodemanApp.prototype, {
           // Momentum phase — convert pixel velocity to lines
           const lines = Math.round(velocity / cellHeight());
           if (lines !== 0) {
-            if (this._shouldForwardWheelToApp({ shiftKey: false })) {
-              // Flick momentum keeps feeding the CLI's transcript from the last
-              // touch point; the 40ms coalescer batches the per-frame reports.
-              this._forwardScrollToApp(touchLastX, touchLastY, lines);
-            } else if (!this._maybePageCliTranscript({ shiftKey: false }, lines)) {
-              this.terminal.scrollLines(lines);
-              this._maybeLoadMoreHistoryOnScroll(lines);
-            }
+            this._scrollTouchTerminal(lines, touchLastX, touchLastY);
           }
           velocity *= 0.92;
           scrollFrame = requestAnimationFrame(scrollLoop);
@@ -749,15 +742,7 @@ Object.assign(CodemanApp.prototype, {
             const ch = cellHeight();
             const lines = Math.trunc(pixelAccum / ch);
             if (lines !== 0) {
-              if (this._shouldForwardWheelToApp({ shiftKey: false })) {
-                this._logScrollRouting('forward-sgr');
-                this._forwardScrollToApp(touchLastX, touchLastY, lines);
-              } else if (!this._maybePageCliTranscript({ shiftKey: false }, lines)) {
-                this._logScrollRouting('local-scrollback');
-                this._noteTerminalUserScroll(lines);
-                this.terminal.scrollLines(lines);
-                this._maybeLoadMoreHistoryOnScroll(lines);
-              }
+              this._scrollTouchTerminal(lines, touchLastX, touchLastY);
               pixelAccum -= lines * ch;
             }
           }
@@ -2614,6 +2599,32 @@ Object.assign(CodemanApp.prototype, {
     this._smoothScrollFrame = requestAnimationFrame(step);
   },
 
+  _scrollLocalOrPageTranscript(lines, ev) {
+    if (!lines || !this.terminal?.buffer?.active) return false;
+    const before = this.terminal.buffer.active.viewportY;
+    this._logScrollRouting('local-scrollback');
+    this._noteTerminalUserScroll(lines);
+    this.terminal.scrollLines(lines);
+    this._maybeLoadMoreHistoryOnScroll(lines);
+    const after = this.terminal.buffer.active.viewportY;
+    if (after !== before) return true;
+    return this._maybePageCliTranscript({ ...ev, allowNonHollow: true }, lines);
+  },
+
+  _scrollTouchTerminal(lines, clientX, clientY) {
+    if (!lines) return;
+    const buffer = this.terminal?.buffer?.active;
+    if (buffer && (buffer.baseY || 0) > 0) {
+      this._scrollLocalOrPageTranscript(lines, { shiftKey: false });
+      return;
+    }
+    if (this._shouldForwardWheelToApp({ shiftKey: false })) {
+      this._forwardTouchScrollToApp(clientX, clientY, lines);
+      return;
+    }
+    this._scrollLocalOrPageTranscript(lines, { shiftKey: false });
+  },
+
   /**
    * Hand a scroll gesture (wheel tick or touch drag, already converted to
    * lines) to the CLI as synthetic SGR wheel reports. SGR coordinates address
@@ -2626,6 +2637,54 @@ Object.assign(CodemanApp.prototype, {
   _forwardScrollToApp(clientX, clientY, lines) {
     if (!this._terminalViewportAtBottom()) this.terminal.scrollToBottom();
     this._sendSyntheticSgrWheel(clientX, clientY, lines);
+  },
+
+  _forwardTouchScrollToApp(clientX, clientY, lines) {
+    const session = this.sessions?.get(this.activeSessionId);
+    if (this._sessionScrollsLikeClaude(session)) {
+      // SGR wheel packets are the fine-grained path Claude Code understands in
+      // current releases. Some mobile/WebKit/tmux combinations can still swallow
+      // a touch-driven wheel without a repaint, so queue PageUp/PageDown as a
+      // delayed rescue only if the visible frame stays unchanged.
+      const before = this._terminalVisibleSignature();
+      this._logScrollRouting('forward-sgr');
+      this._forwardScrollToApp(clientX, clientY, lines);
+      this._scheduleTouchScrollPageFallback(lines, before);
+      return;
+    }
+    this._logScrollRouting('forward-sgr');
+    this._forwardScrollToApp(clientX, clientY, lines);
+  },
+
+  _terminalVisibleSignature() {
+    const buffer = this.terminal?.buffer?.active;
+    if (!buffer) return '';
+    const start = Math.max(0, buffer.viewportY || 0);
+    const rows = this.terminal?.rows || 24;
+    let text = '';
+    for (let i = start; i < Math.min(buffer.length, start + rows); i++) {
+      text += `${buffer.getLine(i)?.translateToString(true) || ''}\n`;
+    }
+    return text;
+  },
+
+  _scheduleTouchScrollPageFallback(lines, beforeSignature) {
+    if (!lines || !this.activeSessionId) return;
+    const sessionId = this.activeSessionId;
+    if (this._touchScrollFallbackSession !== sessionId) {
+      this._touchScrollFallbackSession = sessionId;
+      this._touchScrollFallbackLines = 0;
+    }
+    this._touchScrollFallbackLines = (this._touchScrollFallbackLines || 0) + lines;
+    if (this._touchScrollFallbackTimer) return;
+    this._touchScrollFallbackTimer = setTimeout(() => {
+      this._touchScrollFallbackTimer = null;
+      const pending = this._touchScrollFallbackLines || 0;
+      this._touchScrollFallbackLines = 0;
+      if (!pending || this.activeSessionId !== sessionId) return;
+      if (this._terminalVisibleSignature() !== beforeSignature) return;
+      this._maybePageCliTranscript({ shiftKey: false, allowNonHollow: true, pageFraction: 0.3 }, pending);
+    }, 180);
   },
 
   _hasRecentUserScrollUp() {
@@ -3885,8 +3944,8 @@ Object.assign(CodemanApp.prototype, {
     const mode = this.terminal?.modes?.mouseTrackingMode;
     if (mode && mode !== 'none') return false;
     const session = this.sessions?.get(this.activeSessionId);
-    const sessionMode = session?.mode || 'claude';
-    if (sessionMode !== 'claude') return false;
+    if (!this._sessionScrollsLikeClaude(session)) return false;
+    if (this._sessionIsClaudeLikeShell(session)) return true;
     if (!this._cliVersionAtLeast(session?.cliVersion, '2.1.187')) return false;
     // Deliberately NOT gated on _terminalViewportAtBottom(). It used to be, so
     // that leaving the bottom handed the wheel back to local scrollback and both
@@ -3948,11 +4007,40 @@ Object.assign(CodemanApp.prototype, {
    * is routed — the "wheel does nothing at all" half of the #205 retest.
    */
   _localScrollbackIsHollow() {
-    const mode = this.sessions?.get(this.activeSessionId)?.mode || 'claude';
-    if (mode !== 'claude') return false;
+    const session = this.sessions?.get(this.activeSessionId);
+    if (!this._sessionScrollsLikeClaude(session)) return false;
     const buf = this.terminal?.buffer?.active;
     if (!buf || buf.type === 'alternate') return false;
     return (buf.baseY || 0) === 0;
+  },
+
+  _sessionScrollsLikeClaude(session) {
+    if (!session) return false;
+    if ((session.mode || 'claude') === 'claude') return true;
+    // Custom run actions are shell sessions, but `claude` launched with
+    // ANTHROPIC_* / GLM-compatible env still owns its own transcript. Route
+    // touch/wheel fallback like Claude so mobile swipes do not become no-ops
+    // when xterm's local scrollback is hollow.
+    return this._sessionIsClaudeLikeShell(session);
+  },
+
+  _sessionIsClaudeLikeShell(session) {
+    return (
+      session?.mode === 'shell' &&
+      (session.backend?.type === 'anthropic' || this._terminalScreenLooksClaudeLike())
+    );
+  },
+
+  _terminalScreenLooksClaudeLike() {
+    const buffer = this.terminal?.buffer?.active;
+    if (!buffer) return false;
+    const start = Math.max(0, buffer.viewportY);
+    const end = Math.min(buffer.length, start + (this.terminal?.rows || 24));
+    let text = '';
+    for (let i = start; i < end; i++) {
+      text += `${buffer.getLine(i)?.translateToString(true) || ''}\n`;
+    }
+    return /\bClaude Code\b|\bbypass permissions\b|\bshift\+tab\b|\bANTHROPIC_(?:BASE_URL|MODEL)\b/i.test(text);
   },
 
   /**
@@ -3976,14 +4064,16 @@ Object.assign(CodemanApp.prototype, {
    */
   _maybePageCliTranscript(ev, lines) {
     if (!lines || ev?.shiftKey || !this.activeSessionId) return false;
-    if (!this._localScrollbackIsHollow()) return false;
+    if (!ev?.allowNonHollow && !this._localScrollbackIsHollow()) return false;
+    if (ev?.allowNonHollow && !this._sessionScrollsLikeClaude(this.sessions?.get(this.activeSessionId))) return false;
     // Leftover travel belongs to the tab it was made on.
     if (this._pageKeySession !== this.activeSessionId) {
       this._pageKeySession = this.activeSessionId;
       this._pageKeyPending = 0;
     }
     const tuning = window.CodemanTerminalInput;
-    const perPage = Math.max(2, Math.round((this.terminal?.rows || 24) * tuning.PAGE_KEY_SCREEN_FRACTION));
+    const pageFraction = Number.isFinite(ev?.pageFraction) ? ev.pageFraction : tuning.PAGE_KEY_SCREEN_FRACTION;
+    const perPage = Math.max(2, Math.round((this.terminal?.rows || 24) * pageFraction));
     const pending = (this._pageKeyPending || 0) + lines;
     const pages = Math.trunc(pending / perPage);
     this._pageKeyPending = pending - pages * perPage;

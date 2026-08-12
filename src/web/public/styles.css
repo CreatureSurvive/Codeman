@@ -2194,6 +2194,36 @@ body.solo-mode .btn-lifecycle-log {
   color: #22d3ee;
 }
 
+.session-tab .tab-backend {
+  max-width: 76px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.6rem;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(20, 184, 166, 0.18);
+  color: #2dd4bf;
+  text-transform: uppercase;
+}
+
+.session-tab .tab-backend.openai,
+.session-tab .tab-backend.codex {
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+}
+
+.session-tab .tab-backend.gemini,
+.session-tab .tab-backend.google-vertex {
+  background: rgba(96, 165, 250, 0.18);
+  color: #93c5fd;
+}
+
+.session-tab .tab-backend.anthropic {
+  background: rgba(251, 146, 60, 0.18);
+  color: #fdba74;
+}
+
 /* Timer Banner - Compact */
 .timer-banner {
   display: flex;

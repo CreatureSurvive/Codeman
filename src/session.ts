@@ -52,6 +52,7 @@ import {
   type AntigravityConfig,
   type SessionRemote,
   type SessionDocker,
+  type SessionBackend,
 } from './types.js';
 import { probeDockerCliVersion } from './docker-hosts.js';
 import { probeRemoteCliVersion } from './remote-hosts.js';
@@ -473,6 +474,7 @@ export class Session extends EventEmitter {
   // Ephemeral env overrides (e.g., CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS). Exported by tmux
   // at spawn, preserved across respawns via persisted state. Not written to .claude/settings.local.json.
   private _envOverrides: Record<string, string> | undefined;
+  private _launchCommand: string | undefined;
 
   // Claude CLI effort level — injected as a `--settings` soft default at spawn so the
   // user can still switch in-session via /effort (incl. ultracode). Never carried as
@@ -565,6 +567,8 @@ export class Session extends EventEmitter {
       resumeSessionId?: string;
       /** Extra env vars exported to the CLI at spawn time (no disk persistence) */
       envOverrides?: Record<string, string>;
+      /** Optional shell command to run as the initial pane process without echoing it. */
+      launchCommand?: string;
       /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
       effort?: EffortLevel;
       /** tmux history-limit (scrollback lines) for this session's pane. */
@@ -665,6 +669,7 @@ export class Session extends EventEmitter {
         this._effort = legacyEffort;
       }
     }
+    this._launchCommand = config.launchCommand;
     if (config.effort && isEffortLevel(config.effort)) {
       this._effort = config.effort;
     }
@@ -1183,6 +1188,85 @@ export class Session extends EventEmitter {
     return this._attachmentHistory.length > 0 ? this._attachmentHistory.map((item) => ({ ...item })) : undefined;
   }
 
+  private backendFromUrl(key: string, value: string): SessionBackend | undefined {
+    try {
+      const host = new URL(value).hostname.toLowerCase();
+      const source = host.replace(/^api\./, '').replace(/^open\./, '');
+      if (host.includes('z.ai') || host.includes('bigmodel.cn')) {
+        return { label: 'GLM', type: key.startsWith('OPENAI_') ? 'openai' : 'anthropic', source };
+      }
+      if (host.includes('anthropic.com')) return { label: 'Anthropic', type: 'anthropic', source };
+      if (host.includes('openai.com')) return { label: 'OpenAI', type: 'openai', source };
+      if (host.includes('openrouter.ai')) return { label: 'OpenRouter', type: 'openai', source };
+      if (host.includes('deepseek.com')) return { label: 'DeepSeek', type: 'openai', source };
+      if (host.includes('moonshot') || host.includes('kimi')) return { label: 'Kimi', type: 'openai', source };
+      if (host.includes('dashscope') || host.includes('aliyuncs.com')) return { label: 'Qwen', type: 'openai', source };
+      if (host.includes('generativelanguage.googleapis.com')) return { label: 'Gemini', type: 'gemini', source };
+      if (host.includes('aiplatform.googleapis.com')) return { label: 'Vertex', type: 'google-vertex', source };
+      if (host === 'localhost' || host === '127.0.0.1' || host === '::1')
+        return { label: 'Local', type: 'custom', source };
+      return { label: source.split('.')[0]?.toUpperCase() || 'API', type: 'custom', source };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private getBackendInfo(): SessionBackend | undefined {
+    const env = this._envOverrides ?? {};
+    const model =
+      env.ANTHROPIC_MODEL ||
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL ||
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL ||
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL ||
+      env.OPENAI_MODEL ||
+      env.CODEX_MODEL ||
+      env.GEMINI_MODEL ||
+      this._openCodeConfig?.model ||
+      this._codexConfig?.model ||
+      this._geminiConfig?.model ||
+      this._antigravityConfig?.model;
+
+    for (const key of [
+      'ANTHROPIC_BASE_URL',
+      'ANTHROPIC_API_BASE_URL',
+      'OPENAI_BASE_URL',
+      'OPENAI_API_BASE_URL',
+      'CODEX_BASE_URL',
+      'OPENCODE_BASE_URL',
+      'GEMINI_BASE_URL',
+      'GOOGLE_BASE_URL',
+      'ANTIGRAVITY_BASE_URL',
+    ]) {
+      const backend = env[key] ? this.backendFromUrl(key, env[key]) : undefined;
+      if (backend) return { ...backend, ...(model ? { model } : {}) };
+    }
+
+    if (model && /^glm[-_]/i.test(model)) return { label: 'GLM', type: 'anthropic', model };
+    if (env.GOOGLE_GENAI_USE_VERTEXAI === '1' || env.GOOGLE_CLOUD_PROJECT) {
+      return { label: 'Vertex', type: 'google-vertex', ...(model ? { model } : {}) };
+    }
+    if (env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY) {
+      return { label: 'Anthropic', type: 'anthropic', ...(model ? { model } : {}) };
+    }
+    if (env.OPENAI_API_KEY || env.CODEX_API_KEY)
+      return { label: 'OpenAI', type: 'openai', ...(model ? { model } : {}) };
+    if (env.GEMINI_API_KEY || env.GOOGLE_API_KEY)
+      return { label: 'Gemini', type: 'gemini', ...(model ? { model } : {}) };
+    if (this.mode === 'opencode' && this._openCodeConfig?.model) {
+      return { label: 'OpenCode', type: 'opencode', model: this._openCodeConfig.model };
+    }
+    if (this.mode === 'codex' && this._codexConfig?.model) {
+      return { label: 'Codex', type: 'codex', model: this._codexConfig.model };
+    }
+    if (this.mode === 'gemini' && this._geminiConfig?.model) {
+      return { label: 'Gemini', type: 'gemini', model: this._geminiConfig.model };
+    }
+    if (this.mode === 'antigravity' && this._antigravityConfig?.model) {
+      return { label: 'Antigravity', type: 'antigravity', model: this._antigravityConfig.model };
+    }
+    return undefined;
+  }
+
   toState(): SessionState {
     return {
       id: this.id,
@@ -1224,6 +1308,7 @@ export class Session extends EventEmitter {
       cliModel: this._cliModel || undefined,
       cliAccountType: this._cliAccountType || undefined,
       cliLatestVersion: this._cliLatestVersion || undefined,
+      backend: this.getBackendInfo(),
       openCodeConfig: this._openCodeConfig,
       codexConfig: this._codexConfig,
       geminiConfig: this._geminiConfig,
@@ -2202,6 +2287,7 @@ export class Session extends EventEmitter {
             mode: 'shell',
             niceConfig: this._niceConfig,
             envOverrides: this._envOverrides,
+            launchCommand: this._launchCommand,
             historyLimit: this._tmuxHistoryLimit,
             remote: this._remote,
             docker: this._docker,
@@ -2214,6 +2300,7 @@ export class Session extends EventEmitter {
             name: this._name,
             niceConfig: this._niceConfig,
             envOverrides: this._envOverrides,
+            launchCommand: this._launchCommand,
             historyLimit: this._tmuxHistoryLimit,
             remote: this._remote,
             docker: this._docker,
@@ -2224,7 +2311,7 @@ export class Session extends EventEmitter {
 
         // For NEW sessions: clear by sending 'clear' command to the shell
         // For RESTORED sessions: don't clear - we want to see the existing output
-        if (!isRestored) {
+        if (!isRestored && !this._launchCommand) {
           setTimeout(() => {
             if (this.ptyProcess) {
               this._terminalBuffer.clear();
@@ -2242,13 +2329,14 @@ export class Session extends EventEmitter {
     // Fallback to direct PTY if mux is not used
     if (!this.ptyProcess) {
       try {
+        const args = this._launchCommand ? ['-lc', `exec ${this._launchCommand}`] : [];
         this.ptyProcess = spawnPtyWithHelperRepair(() =>
-          pty.spawn(shell, [], {
+          pty.spawn(shell, args, {
             name: 'xterm-256color',
             cols: 120,
             rows: 40,
             cwd: this.workingDir,
-            env: buildShellEnv(this.id),
+            env: { ...buildShellEnv(this.id), ...(this._envOverrides ?? {}) },
           })
         );
       } catch (spawnErr) {

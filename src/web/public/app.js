@@ -2119,9 +2119,10 @@ class CodemanApp {
     // Skip if buffer load already in progress — avoids competing clear+rewrite cycles
     if (this._isLoadingBuffer) return;
     try {
-      const res = await fetch(`/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`);
+      const res = await this._nodeFetch(`/api/sessions/${this.activeSessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`);
       const data = (await res.json())?.data ?? {};
       if (data.terminalBuffer) {
+        this._applyInferredBackend(this.activeSessionId, data.terminalBuffer);
         this.terminal.clear();
         this.terminal.reset();
         await this.chunkedTerminalWrite(data.terminalBuffer);
@@ -3612,6 +3613,7 @@ class CodemanApp {
         const isActive = id === this.activeSessionId && !this.activeWebviewId;
         const status = session.status || 'idle';
         const name = this.getSessionName(session);
+        const backendBadge = this.getSessionBackendBadge(session);
         const taskStats = session.taskStats || { running: 0, total: 0 };
         const hasRunningTasks = taskStats.running > 0;
         const loadState = this.terminalLoadStates.get(id);
@@ -3685,6 +3687,18 @@ class CodemanApp {
               ? (session.workingDir ? `${_p.prefix} (${session.workingDir})` : _p.prefix)
               : (session.workingDir || '');
           }
+        }
+
+        const backendEl = tab.querySelector('.tab-backend');
+        if (backendBadge) {
+          if (!backendEl || backendEl.textContent !== backendBadge.label || backendEl.dataset.backendType !== backendBadge.type) {
+            this._fullRenderSessionTabs();
+            return;
+          }
+          backendEl.title = backendBadge.title;
+        } else if (backendEl) {
+          this._fullRenderSessionTabs();
+          return;
         }
 
         // Update task badge
@@ -3856,6 +3870,7 @@ class CodemanApp {
       const status = session.status || 'idle';
       const name = this.getSessionName(session);
       const mode = session.mode || 'claude';
+      const backendBadge = this.getSessionBackendBadge(session);
       const color = session.color || 'default';
       const taskStats = session.taskStats || { running: 0, total: 0 };
       const hasRunningTasks = taskStats.running > 0;
@@ -3893,6 +3908,7 @@ class CodemanApp {
           <span class="tab-info">
             <span class="tab-name-row">
               ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : ''}
+              ${backendBadge ? `<span class="tab-backend ${escapeHtml(backendBadge.type)}" data-backend-type="${escapeHtml(backendBadge.type)}" title="${escapeHtml(backendBadge.title)}">${escapeHtml(backendBadge.label)}</span>` : ''}
               <span class="tab-name" data-session-id="${id}">${escapeHtml(tabLabel)}</span>
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
@@ -4202,6 +4218,86 @@ class CodemanApp {
     return this.getShortId(session.id);
   }
 
+  getSessionBackendBadge(session) {
+    const backend = session?.backend;
+    if (!backend?.label) return null;
+    const label = String(backend.label).slice(0, 12);
+    const details = [
+      backend.source ? `source: ${backend.source}` : '',
+      backend.model ? `model: ${backend.model}` : '',
+    ].filter(Boolean);
+    return {
+      label,
+      type: backend.type || 'custom',
+      title: details.length > 0 ? `${label} backend (${details.join(', ')})` : `${label} backend`,
+    };
+  }
+
+  _backendFromUrlHint(key, value) {
+    try {
+      const host = new URL(String(value).replace(/^['"]|['"]$/g, '')).hostname.toLowerCase();
+      const source = host.replace(/^api\./, '').replace(/^open\./, '');
+      if (host.includes('z.ai') || host.includes('bigmodel.cn')) {
+        return { label: 'GLM', type: key.startsWith('OPENAI_') ? 'openai' : 'anthropic', source };
+      }
+      if (host.includes('anthropic.com')) return { label: 'Anthropic', type: 'anthropic', source };
+      if (host.includes('openai.com')) return { label: 'OpenAI', type: 'openai', source };
+      if (host.includes('openrouter.ai')) return { label: 'OpenRouter', type: 'openai', source };
+      if (host.includes('deepseek.com')) return { label: 'DeepSeek', type: 'openai', source };
+      if (host.includes('moonshot') || host.includes('kimi')) return { label: 'Kimi', type: 'openai', source };
+      if (host.includes('dashscope') || host.includes('aliyuncs.com')) return { label: 'Qwen', type: 'openai', source };
+      if (host.includes('generativelanguage.googleapis.com')) return { label: 'Gemini', type: 'gemini', source };
+      if (host.includes('aiplatform.googleapis.com')) return { label: 'Vertex', type: 'google-vertex', source };
+      if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return { label: 'Local', type: 'custom', source };
+      return { label: source.split('.')[0]?.toUpperCase() || 'API', type: 'custom', source };
+    } catch {
+      return null;
+    }
+  }
+
+  _inferBackendFromText(text) {
+    if (!text || typeof text !== 'string') return null;
+    const haystack = text.slice(-256 * 1024);
+    const envValue = (key) => {
+      const match = haystack.match(new RegExp(`(?:^|\\s)${key}=((?:'[^']*')|(?:"[^"]*")|[^\\s]+)`, 'm'));
+      return match ? match[1].replace(/^['"]|['"]$/g, '') : '';
+    };
+    const model =
+      envValue('ANTHROPIC_MODEL') ||
+      envValue('ANTHROPIC_DEFAULT_SONNET_MODEL') ||
+      envValue('ANTHROPIC_DEFAULT_OPUS_MODEL') ||
+      envValue('ANTHROPIC_DEFAULT_HAIKU_MODEL') ||
+      envValue('OPENAI_MODEL') ||
+      envValue('CODEX_MODEL') ||
+      envValue('GEMINI_MODEL');
+    for (const key of [
+      'ANTHROPIC_BASE_URL',
+      'ANTHROPIC_API_BASE_URL',
+      'OPENAI_BASE_URL',
+      'OPENAI_API_BASE_URL',
+      'CODEX_BASE_URL',
+      'OPENCODE_BASE_URL',
+      'GEMINI_BASE_URL',
+      'GOOGLE_BASE_URL',
+      'ANTIGRAVITY_BASE_URL',
+    ]) {
+      const backend = this._backendFromUrlHint(key, envValue(key));
+      if (backend) return { ...backend, ...(model ? { model } : {}) };
+    }
+    if (model && /^glm[-_]/i.test(model)) return { label: 'GLM', type: 'anthropic', model };
+    return null;
+  }
+
+  _applyInferredBackend(sessionId, terminalBuffer) {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.backend) return;
+    const backend = this._inferBackendFromText(terminalBuffer);
+    if (!backend) return;
+    session.backend = backend;
+    this.sessions.set(sessionId, session);
+    this.renderSessionTabs();
+  }
+
   _notifySession(sessionId, urgency, category, title, message) {
     const session = this.sessions.get(sessionId);
     this.notificationManager?.notify({
@@ -4435,6 +4531,21 @@ class CodemanApp {
    * gets a much longer cooldown so a hollow pane stops re-fetching megabytes on
    * every scroll-up (issue #205, round 2).
    */
+  async _fetchTerminalBufferResponse(sessionId, { full = false, tail = TERMINAL_TAIL_SIZE } = {}) {
+    const path = full
+      ? `/api/sessions/${sessionId}/terminal?full=1`
+      : `/api/sessions/${sessionId}/terminal?tail=${tail}`;
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeout = controller
+      ? setTimeout(() => controller.abort(), TERMINAL_FETCH_TIMEOUT_MS)
+      : null;
+    try {
+      return await this._nodeFetch(path, controller ? { signal: controller.signal } : undefined);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
   async _maybeRefetchFullHistory() {
     const sessionId = this.activeSessionId;
     if (!sessionId || this._fullHistoryRepullInFlight || this._isLoadingBuffer) return;
@@ -4447,11 +4558,12 @@ class CodemanApp {
     this._fullHistoryRepullAt.set(sessionId, now);
     this._fullHistoryRepullInFlight = true;
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/terminal?full=1`);
+      const res = await this._fetchTerminalBufferResponse(sessionId, { full: true });
       const buffer = (await res.json())?.data?.terminalBuffer;
       // Bail on a tab switch mid-fetch: writing here would paint another session's
       // history into the terminal the user is now looking at.
       if (!buffer || this.activeSessionId !== sessionId) return;
+      this._applyInferredBackend(sessionId, buffer);
       if (this._replayWouldShrinkBuffer(buffer)) {
         (this._fullHistoryRepullUseless ||= new Set()).add(sessionId);
         this._logScrollRouting?.('repull-refused-downgrade');
@@ -4759,11 +4871,14 @@ class CodemanApp {
       // history to every other one (issue #205).
       const useFullHistory = !this._fullHistoryLoaded.has(sessionId);
       if (useFullHistory) this._fullHistoryLoaded.add(sessionId);
-      const res = await fetch(
-        useFullHistory
-          ? `/api/sessions/${sessionId}/terminal?full=1`
-          : `/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`
-      );
+      let res;
+      try {
+        res = await this._fetchTerminalBufferResponse(sessionId, { full: useFullHistory });
+      } catch (err) {
+        if (!useFullHistory) throw err;
+        _crashDiag.log(`FETCH_FULL_FALLBACK: ${err?.name || 'error'}`);
+        res = await this._fetchTerminalBufferResponse(sessionId, { full: false });
+      }
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
         return;
@@ -4772,6 +4887,7 @@ class CodemanApp {
       _crashDiag.log(`FETCH_DONE: ${data.terminalBuffer ? (data.terminalBuffer.length/1024).toFixed(0) + 'KB' : 'empty'} truncated=${data.truncated}`);
 
       if (data.terminalBuffer) {
+        this._applyInferredBackend(sessionId, data.terminalBuffer);
         // Skip rewrite if fresh buffer matches cache — avoids visible clear+rewrite flash.
         // On slow connections (mobile 5G), the gap between clear() and chunkedWrite() is
         // very visible, causing the terminal to flash blank then repaint.

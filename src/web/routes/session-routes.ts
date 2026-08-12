@@ -2916,6 +2916,7 @@ export function registerSessionRoutes(
       geminiConfig: mode === 'gemini' ? qsGatedGeminiConfig : undefined,
       antigravityConfig: mode === 'antigravity' ? qsGatedAntigravityConfig : undefined,
       envOverrides,
+      launchCommand: mode === 'shell' ? launchCommand : undefined,
       effort,
       remote,
       docker,
@@ -2950,13 +2951,6 @@ export function registerSessionRoutes(
     try {
       if (mode === 'shell') {
         await session.startShell();
-        if (launchCommand) {
-          await new Promise((resolve) => setTimeout(resolve, 250));
-          const sent = await session.writeViaMux(`${launchCommand}\r`);
-          if (!sent) {
-            throw new Error('Failed to send launch command: mux write failed');
-          }
-        }
         getLifecycleLog().log({
           event: 'started',
           sessionId: session.id,

@@ -145,6 +145,10 @@ html.mobile-init .file-browser-panel {
     max-width: 80px;
   }
 
+  .session-tab .tab-backend {
+    max-width: 48px;
+  }
+
   /* Compact toolbar - includes safe area padding */
   .toolbar {
     padding: 0.4rem 0.5rem;
@@ -680,6 +684,10 @@ html.mobile-init .file-browser-panel {
     max-width: 50px;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .session-tab .tab-backend {
+    max-width: 42px;
   }
 
   /* Hide close/gear buttons on non-active tabs on mobile */

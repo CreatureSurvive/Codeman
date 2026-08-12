@@ -779,6 +779,7 @@ export function buildSpawnCommand(options: {
   antigravityConfig?: AntigravityConfig;
   resumeSessionId?: string;
   effort?: EffortLevel;
+  launchCommand?: string;
   /** Codeman session name, passed to claude as `--name` (version-gated, sanitized; local spawns only). */
   sessionName?: string;
   /**
@@ -837,6 +838,9 @@ export function buildSpawnCommand(options: {
   // appended to a path that ultimately comes from the passwd entry, and a shell
   // that rejects an unknown flag exits on the spot, which is #208 all over again.
   const shell = resolveLocalShell();
+  if (options.launchCommand) {
+    return `${shellescape(shell)} -lc ${shellescape(`exec ${options.launchCommand}`)}`;
+  }
   return `${shellescape(shell)}${loginShellArgs(shell)}`;
 }
 
@@ -903,8 +907,9 @@ export function buildRemoteLaunchCommand(options: {
   sessionId: string;
   claudeMode?: ClaudeMode;
   allowedTools?: string;
+  launchCommand?: string;
 }): string {
-  const { mode, remote, sessionId, claudeMode, allowedTools } = options;
+  const { mode, remote, sessionId, claudeMode, allowedTools, launchCommand } = options;
   // §6.3: honor the session's EFFECTIVE claude permission mode on remote instead of
   // hardcoding --dangerously-skip-permissions, so a non-granted multi-user user's
   // downgraded 'auto' actually reaches the remote agent (the default command otherwise
@@ -913,11 +918,14 @@ export function buildRemoteLaunchCommand(options: {
   // `defaultRemoteCommandForMode`: `claude` lives under a per-user PATH entry that
   // only an interactive login shell resolves (see that function's comment).
   const override = remote.commands?.[mode];
-  const modeCommand = override
-    ? override
-    : mode === 'claude'
-      ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
-      : defaultRemoteCommandForMode(mode);
+  const modeCommand =
+    launchCommand && mode === 'shell'
+      ? remoteLoginShellCommand(`exec ${launchCommand}`)
+      : override
+        ? override
+        : mode === 'claude'
+          ? remoteLoginShellCommand(`claude${buildClaudePermissionFlags(claudeMode, allowedTools)}`)
+          : defaultRemoteCommandForMode(mode);
   const remoteName = remoteTmuxSessionName(sessionId);
 
   // Innermost: the command tmux runs in the new pane. Run via `/bin/sh -c` by
@@ -1071,6 +1079,7 @@ export interface DockerLaunchOptions {
   docker: SessionDocker;
   sessionId: string;
   resumeSessionId?: string;
+  launchCommand?: string;
   createContext: DockerCreateContext;
   /** exec-time inline env (non-secret): TERM, COLORTERM, CODEMAN_SESSION_ID, CODEMAN_MUX */
   execEnv: Record<string, string>;
@@ -1094,7 +1103,8 @@ export interface DockerLaunchOptions {
  * command -> `docker exec … sh -lc '<tmux>'` -> tmux `'<paneCommand>'`.
  */
 export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
-  const { mode, docker, sessionId, resumeSessionId, createContext, execEnv, execEnvNames, seedCopies } = opts;
+  const { mode, docker, sessionId, resumeSessionId, launchCommand, createContext, execEnv, execEnvNames, seedCopies } =
+    opts;
   const base = buildDockerBaseArgs(docker).join(' ');
   const createArgs = buildDockerCreateArgs(createContext).join(' ');
   const name = shellescape(docker.containerName);
@@ -1103,7 +1113,10 @@ export function buildDockerLaunchCommand(opts: DockerLaunchOptions): string {
   const dkrName = dockerTmuxSessionName(sessionId);
   const sid = sessionId.slice(0, 8);
 
-  let modeCommand = docker.commands?.[mode as DockerCommandMode] || defaultDockerCommandForMode(mode);
+  let modeCommand =
+    launchCommand && mode === 'shell'
+      ? `exec bash -lc ${shellescape(`exec ${launchCommand}`)}`
+      : docker.commands?.[mode as DockerCommandMode] || defaultDockerCommandForMode(mode);
   if (mode === 'claude') {
     modeCommand = claudeDockerPaneCommand(modeCommand, sessionId, resumeSessionId);
   } else if (resumeSessionId) {
@@ -1323,6 +1336,7 @@ function buildRemoteSessionCommand(options: {
   sessionId: string;
   claudeMode?: ClaudeMode;
   allowedTools?: string;
+  launchCommand?: string;
 }): string {
   const { remote, sessionId } = options;
   if (remote.owned === false) {
@@ -1748,6 +1762,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       antigravityConfig,
       resumeSessionId,
       envOverrides,
+      launchCommand,
       effort,
       historyLimit = DEFAULT_TMUX_HISTORY_LIMIT,
       remote,
@@ -1817,6 +1832,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       antigravityConfig,
       resumeSessionId,
       effort,
+      launchCommand,
       sessionName: name,
     });
 
@@ -1827,9 +1843,12 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       // Build the full command to run inside tmux
       const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
       const fullCmd = docker
-        ? buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
+        ? buildDockerLaunchCommand({
+            ...resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId),
+            launchCommand,
+          })
         : remote
-          ? buildRemoteSessionCommand({ mode, remote, sessionId, claudeMode, allowedTools })
+          ? buildRemoteSessionCommand({ mode, remote, sessionId, claudeMode, allowedTools, launchCommand })
           : localFullCmd;
 
       // Create tmux session in three steps to handle cold-start (no server running)
@@ -2041,6 +2060,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       antigravityConfig,
       resumeSessionId,
       envOverrides,
+      launchCommand,
       effort,
       historyLimit = DEFAULT_TMUX_HISTORY_LIMIT,
       remote,
@@ -2080,15 +2100,19 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       antigravityConfig,
       resumeSessionId,
       effort,
+      launchCommand,
       sessionName: name,
     });
     const config = niceConfig || DEFAULT_NICE_CONFIG;
     const cmd = wrapWithNice(baseCmd, config);
     const localFullCmd = `${buildNofileLimitCommand()} && ${pathExport}${envExportsStr} && ${cmd}`;
     const fullCmd = docker
-      ? buildDockerLaunchCommand(resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId))
+      ? buildDockerLaunchCommand({
+          ...resolveDockerLaunchOptions(mode, docker, sessionId, resumeSessionId),
+          launchCommand,
+        })
       : remote
-        ? buildRemoteSessionCommand({ mode, remote, sessionId, claudeMode, allowedTools })
+        ? buildRemoteSessionCommand({ mode, remote, sessionId, claudeMode, allowedTools, launchCommand })
         : localFullCmd;
 
     try {

@@ -45,6 +45,17 @@ export type ClaudeMode = 'dangerously-skip-permissions' | 'auto' | 'normal' | 'a
 /** Session mode: which CLI backend a session runs */
 export type SessionMode = 'claude' | 'shell' | 'opencode' | 'codex' | 'gemini' | 'antigravity';
 
+export interface SessionBackend {
+  /** Short non-secret label for the API backend, e.g. GLM, Anthropic, OpenAI. */
+  label: string;
+  /** Backend family inferred from non-secret env/config values. */
+  type: 'anthropic' | 'openai' | 'gemini' | 'google-vertex' | 'opencode' | 'codex' | 'antigravity' | 'custom';
+  /** Hostname or stable source identifier. Never includes tokens, paths, query strings, or credentials. */
+  source?: string;
+  /** Non-secret model hint when configured through env or CLI config. */
+  model?: string;
+}
+
 export type RemoteCommandMode = Extract<
   SessionMode,
   'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity'
@@ -476,6 +487,8 @@ export interface SessionState {
   cliAccountType?: string;
   /** Latest CLI version available (parsed from version check) */
   cliLatestVersion?: string;
+  /** Non-secret backend badge metadata inferred from env/config. */
+  backend?: SessionBackend;
   /** OpenCode-specific configuration (only for mode === 'opencode') */
   openCodeConfig?: OpenCodeConfig;
   /** Codex-specific configuration (only for mode === 'codex') */

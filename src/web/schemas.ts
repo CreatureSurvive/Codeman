@@ -122,7 +122,17 @@ export const FileWriteSchema = z
 // ========== Env Var Allowlist ==========
 
 /** Allowlisted env var key prefixes */
-const ALLOWED_ENV_PREFIXES = ['CLAUDE_CODE_', 'OPENCODE_', 'CODEX_', 'GEMINI_', 'GOOGLE_', 'ANTIGRAVITY_'];
+const ALLOWED_ENV_PREFIXES = [
+  'ANTHROPIC_',
+  'CLAUDE_CODE_',
+  'CODEX_',
+  'GEMINI_',
+  'GOOGLE_',
+  'OPENAI_',
+  'OPENCODE_',
+  'OPENCLAW_',
+  'ANTIGRAVITY_',
+];
 
 /**
  * Allowlisted exact env var keys (checked alongside the prefixes).
@@ -130,7 +140,7 @@ const ALLOWED_ENV_PREFIXES = ['CLAUDE_CODE_', 'OPENCODE_', 'CODEX_', 'GEMINI_', 
  * settings, stats) so a case can run on a separate Claude subscription (#255).
  * Exact match only — CLAUDE_CONFIG_DIR_EXTRA etc. stay rejected.
  */
-const ALLOWED_ENV_KEYS = new Set(['CLAUDE_CONFIG_DIR']);
+const ALLOWED_ENV_KEYS = new Set(['API_TIMEOUT_MS', 'CLAUDE_CONFIG_DIR']);
 
 /** Env var keys that are always blocked (security-sensitive) */
 const BLOCKED_ENV_KEYS = new Set([
@@ -161,7 +171,7 @@ const safeEnvOverridesSchema = z
     },
     {
       message:
-        'envOverrides contains blocked or disallowed env var keys. Only CLAUDE_CODE_*, OPENCODE_*, CODEX_*, GEMINI_*, GOOGLE_*, ANTIGRAVITY_* keys and CLAUDE_CONFIG_DIR are allowed.',
+        'envOverrides contains blocked or disallowed env var keys. Only ANTHROPIC_*, CLAUDE_CODE_*, CODEX_*, GEMINI_*, GOOGLE_*, OPENAI_*, OPENCODE_*, OPENCLAW_*, ANTIGRAVITY_*, API_TIMEOUT_MS, and CLAUDE_CONFIG_DIR are allowed.',
     }
   );
 

@@ -39,6 +39,12 @@ Object.assign(CodemanApp.prototype, {
     return `/api/nodes/${encodeURIComponent(this.currentNodeId)}/proxy${path}`;
   },
 
+  _nodeFetch(path, init) {
+    const url = this._nodeApiPath(path);
+    const fetcher = window.__codemanNativeFetch || window.fetch.bind(window);
+    return fetcher(url, init);
+  },
+
   _installNodeFetchProxy() {
     if (window.__codemanNodeFetchProxyInstalled) return;
     window.__codemanNodeFetchProxyInstalled = true;
@@ -220,7 +226,7 @@ Object.assign(CodemanApp.prototype, {
       fetchOpts.body = JSON.stringify(body);
     }
     try {
-      const res = await fetch(this._nodeApiPath(path), fetchOpts);
+      const res = await this._nodeFetch(path, fetchOpts);
       return res;
     } catch {
       return null;
