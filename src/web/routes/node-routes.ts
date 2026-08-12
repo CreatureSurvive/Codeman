@@ -71,8 +71,11 @@ async function proxyFetch(req: FastifyRequest, reply: FastifyReply, nodeId: stri
     if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   }
 
+  const abort = new AbortController();
+  req.raw.on('close', () => abort.abort());
+
   try {
-    const upstream = await fetch(url, { method: req.method, headers, body });
+    const upstream = await fetch(url, { method: req.method, headers, body, signal: abort.signal });
     reply.code(upstream.status);
     upstream.headers.forEach((value, key) => {
       const lower = key.toLowerCase();
@@ -84,11 +87,30 @@ async function proxyFetch(req: FastifyRequest, reply: FastifyReply, nodeId: stri
       return;
     }
     if ((upstream.headers.get('content-type') || '').includes('text/event-stream')) {
-      reply.send(Readable.fromWeb(upstream.body));
+      const inherited: Record<string, number | string | string[]> = {};
+      for (const [name, value] of Object.entries(reply.getHeaders())) {
+        if (value !== undefined) inherited[name] = value;
+      }
+      reply.raw.writeHead(upstream.status, {
+        ...inherited,
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+      try {
+        for await (const chunk of Readable.fromWeb(upstream.body)) {
+          if (reply.raw.destroyed) break;
+          reply.raw.write(chunk);
+        }
+      } finally {
+        if (!reply.raw.destroyed) reply.raw.end();
+      }
       return;
     }
     reply.send(Buffer.from(await upstream.arrayBuffer()));
   } catch (err) {
+    if (abort.signal.aborted) return;
     const message = err instanceof Error ? err.message : 'Could not reach node';
     reply.code(502).send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, message));
   }
