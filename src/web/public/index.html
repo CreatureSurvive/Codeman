@@ -531,6 +531,12 @@
                 <span class="run-mode-dot shell"></span>Terminal / Shell
               </button>
               <div class="run-mode-sep"></div>
+              <div class="run-mode-header">Custom Actions</div>
+              <div class="run-mode-custom" id="runModeCustomActions"></div>
+              <button class="run-mode-option run-mode-option--add" onclick="app.addCustomRunAction()">
+                <span class="run-mode-dot custom"></span>Add Action&hellip;
+              </button>
+              <div class="run-mode-sep"></div>
               <!-- Web tabs: dashboards open as tabs beside agent sessions. These do NOT
                    set runMode: the Run button always means "start an agent". -->
               <div class="run-mode-header">Web / URL</div>
@@ -2007,6 +2013,23 @@
                   </div>
                 </div>
               </div>
+
+              <div class="set-group">
+                <div class="set-group-head"><h4>Custom actions</h4><span class="set-scope">synced</span></div>
+                <p class="set-group-hint">Shell-backed launch entries that appear in the Run menu.</p>
+                <div class="set-group-body">
+                  <div class="set-row set-row-block" data-search="custom actions run menu launch command environment variables glm backend">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Run menu actions</span>
+                      <span class="set-row-desc">Create reusable launch commands with optional environment variables.</span>
+                    </div>
+                    <div class="custom-actions-list" id="appSettingsCustomActionsList"></div>
+                    <div class="set-row-actions">
+                      <button type="button" class="btn-toolbar btn-sm" onclick="app.showCustomRunActionEditor()">Add Action</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </section>
 
             <!-- ══ Notifications ════════════════════════════════════════════ -->
@@ -2320,6 +2343,64 @@
         <div class="form-actions set-foot">
           <button class="btn-toolbar" onclick="app.closeAppSettings()">Cancel</button>
           <button class="btn-toolbar btn-primary" onclick="app.saveAppSettings()">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Custom Run Action Editor -->
+    <div class="modal" id="customRunActionModal">
+      <div class="modal-backdrop" onclick="app.closeCustomRunActionEditor()"></div>
+      <div class="modal-content modal-lg set-shell custom-action-modal">
+        <div class="modal-header set-shell-head">
+          <h3 id="customRunActionTitle">Custom Action</h3>
+          <div class="set-head-actions">
+            <button class="modal-close" onclick="app.closeCustomRunActionEditor()" aria-label="Close custom action editor">&times;</button>
+            <button class="set-head-save" onclick="app.saveCustomRunActionFromEditor()">Save</button>
+          </div>
+        </div>
+        <div class="set-doc custom-action-doc">
+          <section class="set-section">
+            <div class="set-section-head">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h2"/><path d="M16 3h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-2"/><circle cx="12" cy="12" r="2.5"/></svg>
+              <h2>Launch Action</h2>
+            </div>
+            <p class="set-section-blurb">Configure a Run menu entry for a shell-backed agent launch.</p>
+
+            <div class="set-group">
+              <div class="set-group-head"><h4>Command</h4></div>
+              <div class="set-group-body">
+                <div class="set-row has-field">
+                  <div class="set-row-text">
+                    <span class="set-row-label">Name</span>
+                    <span class="set-row-desc">Shown in the Run menu and on the Run button.</span>
+                  </div>
+                  <input type="text" id="customRunActionLabel" class="set-input" maxlength="40" placeholder="GLM">
+                </div>
+                <div class="set-row has-field">
+                  <div class="set-row-text">
+                    <span class="set-row-label">Launch command</span>
+                    <span class="set-row-desc">Single-line command submitted when the shell session starts.</span>
+                  </div>
+                  <input type="text" id="customRunActionCommand" class="set-input" maxlength="2000" placeholder="claude">
+                </div>
+              </div>
+            </div>
+
+            <div class="set-group">
+              <div class="set-group-head">
+                <h4>Environment</h4>
+                <div class="custom-action-env-add">
+                  <button type="button" class="btn-toolbar btn-sm" onclick="app.toggleCustomRunActionEnvMenu(event)">Add Env Var</button>
+                </div>
+              </div>
+              <div class="custom-action-env-menu" id="customRunActionEnvMenu"></div>
+              <div class="custom-action-env-list" id="customRunActionEnvList"></div>
+            </div>
+          </section>
+        </div>
+        <div class="form-actions set-foot">
+          <button type="button" class="btn-toolbar btn-sm" onclick="app.closeCustomRunActionEditor()">Cancel</button>
+          <button type="button" class="btn-toolbar btn-primary" onclick="app.saveCustomRunActionFromEditor()">Save Action</button>
         </div>
       </div>
     </div>

@@ -225,17 +225,23 @@ const KeyboardHandler = {
     this.initialViewportHeight = window.visualViewport?.height || window.innerHeight;
     this.lastViewportHeight = this.initialViewportHeight;
 
-    // Simple focus handler - scroll input into view after keyboard appears
+    // Scroll focused form controls above the virtual keyboard. iOS Safari emits
+    // several visualViewport updates during the keyboard animation, so retry
+    // after the first focus instead of trusting a single early measurement.
     this._focusinHandler = (e) => {
       const target = e.target;
       if (!this.isInputElement(target)) return;
 
-      // Wait for keyboard animation, then scroll input into view
-      setTimeout(() => {
-        this.scrollInputIntoView(target);
-      }, 400);
+      this.scheduleFocusedInputScroll(target);
     };
     document.addEventListener('focusin', this._focusinHandler);
+
+    this._touchInputHandler = (e) => {
+      const target = e.target;
+      if (!this.isInputElement(target)) return;
+      this.scheduleFocusedInputScroll(target);
+    };
+    document.addEventListener('touchstart', this._touchInputHandler, { passive: true, capture: true });
 
     // Use visualViewport to detect keyboard and reposition toolbar
     if (window.visualViewport) {
@@ -244,6 +250,7 @@ const KeyboardHandler = {
       };
       this._viewportScrollHandler = () => {
         this.updateLayoutForKeyboard();
+        this.scrollFocusedInputIntoView();
       };
       window.visualViewport.addEventListener('resize', this._viewportResizeHandler);
       // Also handle scroll (iOS scrolls viewport when keyboard appears)
@@ -267,6 +274,10 @@ const KeyboardHandler = {
     if (this._focusinHandler) {
       document.removeEventListener('focusin', this._focusinHandler);
       this._focusinHandler = null;
+    }
+    if (this._touchInputHandler) {
+      document.removeEventListener('touchstart', this._touchInputHandler, { capture: true });
+      this._touchInputHandler = null;
     }
     if (this._viewportResizeHandler && window.visualViewport) {
       window.visualViewport.removeEventListener('resize', this._viewportResizeHandler);
@@ -323,6 +334,7 @@ const KeyboardHandler = {
     }
 
     this.updateLayoutForKeyboard();
+    this.scrollFocusedInputIntoView();
     this._deferViewportSettle();
     this.lastViewportHeight = currentHeight;
   },
@@ -562,28 +574,81 @@ const KeyboardHandler = {
   },
 
   /** Scroll input into view above the keyboard */
+  scheduleFocusedInputScroll(input = document.activeElement) {
+    if (!this.isInputElement(input)) return;
+    [0, 80, 220, 420, 700, 950].forEach((delay) => {
+      setTimeout(() => this.scrollInputIntoView(input), delay);
+    });
+  },
+
+  scrollFocusedInputIntoView() {
+    const input = document.activeElement;
+    if (!this.isInputElement(input)) return;
+    this.scrollInputIntoView(input);
+  },
+
   scrollInputIntoView(input) {
     // Check if input is still focused (user might have tapped away)
     if (document.activeElement !== input) return;
 
-    // Find if we're in a modal
-    const modal = input.closest('.modal.active');
-    const modalBody = modal?.querySelector('.modal-body');
+    const scroller = this.getInputScrollContainer(input);
+    const visualBottom = this.getUsableVisualBottom(input, scroller);
+    const visualTop = window.visualViewport?.offsetTop || 0;
+    const inputRect = input.getBoundingClientRect();
+    const margin = 36;
+    const behavior = this.keyboardVisible ? 'auto' : 'smooth';
 
-    if (modalBody) {
-      // For modals - scroll within the modal body
-      const inputRect = input.getBoundingClientRect();
-      const modalRect = modalBody.getBoundingClientRect();
-
-      // If input is below middle of modal, scroll it up
-      if (inputRect.top > modalRect.top + modalRect.height * 0.4) {
-        const scrollAmount = inputRect.top - modalRect.top - 100;
-        modalBody.scrollBy({ top: scrollAmount, behavior: 'smooth' });
+    if (scroller) {
+      let delta = 0;
+      const scrollerTop = Math.max(visualTop, scroller.getBoundingClientRect().top);
+      const safeHeight = Math.max(80, visualBottom - scrollerTop);
+      const preferredBottom = this.keyboardVisible ? scrollerTop + safeHeight * 0.72 : visualBottom - margin;
+      if (inputRect.bottom + margin > preferredBottom) {
+        delta = inputRect.bottom + margin - preferredBottom;
+      } else if (inputRect.top - margin < scrollerTop) {
+        delta = inputRect.top - margin - scrollerTop;
       }
-    } else {
-      // For page-level - use scrollIntoView
-      input.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      if (Math.abs(delta) > 1) {
+        scroller.scrollBy({ top: delta, behavior });
+      }
+      return;
     }
+
+    if (inputRect.bottom + margin > visualBottom || inputRect.top < visualTop) {
+      input.scrollIntoView({ block: 'center', behavior });
+    }
+  },
+
+  getInputScrollContainer(input) {
+    const modal = input.closest('.modal.active');
+    if (modal) {
+      return input.closest('.set-doc, .modal-body') || modal.querySelector('.set-doc, .modal-body') || null;
+    }
+
+    const scrollable = input.closest('.set-doc, .modal-body, .main, .panel-content');
+    if (scrollable && scrollable.scrollHeight > scrollable.clientHeight) return scrollable;
+    return null;
+  },
+
+  getUsableVisualBottom(input, scroller) {
+    const viewport = window.visualViewport;
+    let bottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+    const modal = input.closest('.modal.active');
+    const footer = modal?.querySelector('.set-foot, .form-actions, .modal-footer');
+    if (footer) {
+      const footerRect = footer.getBoundingClientRect();
+      if (footerRect.height > 0) bottom = Math.min(bottom, footerRect.top);
+    }
+    const blockingElements = document.querySelectorAll('.keyboard-accessory-bar.visible, .toolbar');
+    blockingElements.forEach((el) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.height > 0 && rect.top > 0 && rect.top < bottom) bottom = rect.top;
+    });
+    if (scroller) {
+      const scrollRect = scroller.getBoundingClientRect();
+      bottom = Math.min(bottom, scrollRect.bottom);
+    }
+    return bottom - 12;
   },
 };
 

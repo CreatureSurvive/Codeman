@@ -684,6 +684,9 @@ export const DockerQuickCreateSchema = z.object({
   mountCredentials: z.boolean().optional(),
 });
 
+/** Prompt/launch delivery is single-line only (writeViaMux/Ink constraint) — reject newlines outright. */
+const noNewlines = (v: string) => !/[\r\n]/.test(v);
+
 // ========== Quick Start ==========
 
 /**
@@ -706,6 +709,7 @@ export const QuickStartSchema = z.object({
    *  remote cases (the file would be written on the WRONG machine). */
   modelOverride: z.string().max(50).optional(),
   mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity']).optional(),
+  launchCommand: z.string().max(2000).refine(noNewlines, 'launchCommand must be a single line').optional(),
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
@@ -1004,7 +1008,29 @@ export const SettingsUpdateSchema = z
       })
       .optional(),
     // Run mode preference (cross-device sync)
-    runMode: z.string().max(20).optional(),
+    runMode: z.string().max(80).optional(),
+    customRunActions: z
+      .array(
+        z.object({
+          id: z.string().max(64),
+          label: z.string().min(1).max(40),
+          command: z.string().min(1).max(2000).refine(noNewlines, 'command must be a single line'),
+          env: z
+            .array(
+              z.object({
+                key: z
+                  .string()
+                  .max(128)
+                  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'Invalid environment variable name'),
+                value: z.string().max(2000).refine(noNewlines, 'value must be a single line'),
+              })
+            )
+            .max(50)
+            .optional(),
+        })
+      )
+      .max(20)
+      .optional(),
     // Custom respawn presets (cross-device sync, replaces localStorage-only storage)
     respawnPresets: z
       .array(
@@ -1204,9 +1230,6 @@ export const ScheduledRunSchema = z.object({
 
 /** 'HH:MM' 24-hour time. */
 const hhmmSchema = z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/, 'Time must be HH:MM (24-hour)');
-
-/** Prompt delivery is single-line only (writeViaMux/Ink constraint) — reject newlines outright. */
-const noNewlines = (v: string) => !/[\r\n]/.test(v);
 
 /** Shared field shape for creating/updating a scheduled job. */
 const CronJobBaseSchema = z.object({

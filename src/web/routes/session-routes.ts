@@ -2565,6 +2565,7 @@ export function registerSessionRoutes(
       caseName = 'testcase',
       sessionName,
       mode = 'claude',
+      launchCommand,
       modelOverride,
       openCodeConfig,
       codexConfig,
@@ -2577,8 +2578,11 @@ export function registerSessionRoutes(
 
     // Multi-user: shell mode is arbitrary host-account execution, gated by the grant.
     // Resolve the owner's grant from the store so a GRANTED regular user is not wrongly denied.
-    if (mode === 'shell' && !(await canUsernameRunPrivilegedCommands(owner))) {
+    if ((mode === 'shell' || launchCommand) && !(await canUsernameRunPrivilegedCommands(owner))) {
       return createErrorResponse(ApiErrorCode.FORBIDDEN, 'Shell sessions require the can-bypass-permissions grant');
+    }
+    if (launchCommand && mode !== 'shell') {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'launchCommand is only supported for shell sessions');
     }
 
     // Resolve the remote case FIRST — the CLI executes on the REMOTE host over ssh,
@@ -2946,6 +2950,13 @@ export function registerSessionRoutes(
     try {
       if (mode === 'shell') {
         await session.startShell();
+        if (launchCommand) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          const sent = await session.writeViaMux(`${launchCommand}\r`);
+          if (!sent) {
+            throw new Error('Failed to send launch command: mux write failed');
+          }
+        }
         getLifecycleLog().log({
           event: 'started',
           sessionId: session.id,

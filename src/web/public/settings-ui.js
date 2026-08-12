@@ -378,6 +378,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsSubagentTracking').checked = settings.subagentTrackingEnabled ?? defaults.subagentTrackingEnabled ?? true;
     document.getElementById('appSettingsSubagentActiveTabOnly').checked = settings.subagentActiveTabOnly ?? defaults.subagentActiveTabOnly ?? true;
     document.getElementById('appSettingsImageWatcherEnabled').checked = settings.imageWatcherEnabled ?? defaults.imageWatcherEnabled ?? false;
+    this.renderSettingsCustomRunActions?.();
     document.getElementById('appSettingsTunnelEnabled').checked = settings.tunnelEnabled ?? false;
     this.loadTunnelStatus();
     document.getElementById('appSettingsLocalEcho').checked = settings.localEchoEnabled ?? MobileDetection.isTouchDevice();
@@ -2021,6 +2022,7 @@ Object.assign(CodemanApp.prototype, {
       opusContext1mEnabled: document.getElementById('appSettingsOpusContext1m').checked,
       remoteAutoReconnect: document.getElementById('appSettingsRemoteAutoReconnect').checked,
       thinkingEffort: document.getElementById('appSettingsThinkingEffort').value,
+      customRunActions: this.getCustomRunActions?.() || [],
       // CPU Priority settings
       nice: {
         enabled: document.getElementById('appSettingsNiceEnabled').checked,
@@ -2840,7 +2842,7 @@ Object.assign(CodemanApp.prototype, {
       const settings = settingsPromise ? await settingsPromise : await fetch('/api/settings').then(r => r.ok ? r.json() : null).then(env => env?.success === true ? env.data : env);
       if (settings) {
         // Extract notification prefs before merging app settings
-        const { notificationPreferences, voiceSettings, respawnPresets, runMode, ...appSettings } = settings;
+        const { notificationPreferences, voiceSettings, respawnPresets, runMode, customRunActions, ...appSettings } = settings;
         // Filter out display settings — these are device-specific (mobile vs desktop)
         // and should not be synced from the server to avoid overriding mobile defaults.
         // NOTE: Feature toggles (subagentTrackingEnabled, imageWatcherEnabled, ralphTrackerEnabled)
@@ -2914,6 +2916,19 @@ Object.assign(CodemanApp.prototype, {
             if (parsed.length > 0) {
               this._serverRespawnPresets = parsed;
               this._apiPut('/api/settings', { respawnPresets: parsed }).catch(() => {});
+            }
+          }
+        }
+
+        // Sync custom run actions from server (server is source of truth once present).
+        if (Array.isArray(customRunActions)) {
+          this.setCustomRunActions?.(customRunActions, { sync: false });
+        } else {
+          const localActions = localStorage.getItem('codeman_customRunActions');
+          if (localActions) {
+            const parsed = JSON.parse(localActions);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              this._apiPut('/api/settings', { customRunActions: parsed }).catch(() => {});
             }
           }
         }

@@ -353,6 +353,447 @@ Object.assign(CodemanApp.prototype, {
     return this.run();
   },
 
+  _normalizeCustomRunActions(actions) {
+    if (!Array.isArray(actions)) return [];
+    const seen = new Set();
+    return actions
+      .map(action => ({
+        id: String(action?.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64),
+        label: String(action?.label || '').trim().slice(0, 40),
+        command: String(action?.command || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 2000),
+        env: Array.isArray(action?.env)
+          ? action.env
+            .map(entry => ({
+              key: String(entry?.key || '').trim().replace(/[^A-Za-z0-9_]/g, '').slice(0, 128),
+              value: String(entry?.value || '').replace(/[\r\n]+/g, ' ').slice(0, 2000),
+            }))
+            .filter(entry => /^[A-Za-z_][A-Za-z0-9_]*$/.test(entry.key))
+            .slice(0, 50)
+          : [],
+      }))
+      .filter(action => action.id && action.label && action.command && !seen.has(action.id) && seen.add(action.id))
+      .slice(0, 20);
+  },
+
+  getCustomRunActions() {
+    try {
+      return this._normalizeCustomRunActions(JSON.parse(localStorage.getItem('codeman_customRunActions') || '[]'));
+    } catch {
+      return [];
+    }
+  },
+
+  setCustomRunActions(actions, { sync = true } = {}) {
+    const normalized = this._normalizeCustomRunActions(actions);
+    try { localStorage.setItem('codeman_customRunActions', JSON.stringify(normalized)); } catch {}
+    this.renderCustomRunActions();
+    this.renderSettingsCustomRunActions?.();
+    if (sync) this._apiPut('/api/settings', { customRunActions: normalized }).catch(() => {});
+    return normalized;
+  },
+
+  renderCustomRunActions() {
+    const container = document.getElementById('runModeCustomActions');
+    if (!container) return;
+    const actions = this.getCustomRunActions();
+    if (actions.length === 0) {
+      container.innerHTML = '<div class="run-mode-hist-empty">No custom actions</div>';
+      return;
+    }
+    container.replaceChildren();
+    for (const action of actions) {
+      const row = document.createElement('div');
+      row.className = 'run-mode-custom-row';
+
+      const select = document.createElement('button');
+      select.className = 'run-mode-option';
+      select.dataset.mode = `custom:${action.id}`;
+      select.title = action.command;
+      select.classList.toggle('selected', this.runMode === `custom:${action.id}`);
+      select.innerHTML = '<span class="run-mode-dot custom"></span>';
+      select.append(document.createTextNode(action.label));
+      select.addEventListener('click', () => this.setRunMode(`custom:${action.id}`));
+
+      const edit = document.createElement('button');
+      edit.className = 'run-mode-custom-tools';
+      edit.type = 'button';
+      edit.title = 'Edit action';
+      edit.textContent = 'Edit';
+      edit.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.editCustomRunAction(action.id);
+      });
+
+      const remove = document.createElement('button');
+      remove.className = 'run-mode-custom-tools';
+      remove.type = 'button';
+      remove.title = 'Delete action';
+      remove.textContent = 'Del';
+      remove.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.deleteCustomRunAction(action.id);
+      });
+
+      row.append(select, edit, remove);
+      container.appendChild(row);
+    }
+  },
+
+  renderSettingsCustomRunActions() {
+    const container = document.getElementById('appSettingsCustomActionsList');
+    if (!container) return;
+    const actions = this.getCustomRunActions();
+    if (actions.length === 0) {
+      container.innerHTML = '<div class="set-empty">No custom actions yet.</div>';
+      return;
+    }
+    container.replaceChildren();
+    for (const action of actions) {
+      const row = document.createElement('div');
+      row.className = 'custom-actions-settings-row';
+
+      const text = document.createElement('div');
+      text.className = 'custom-actions-settings-text';
+
+      const name = document.createElement('span');
+      name.className = 'custom-actions-settings-name';
+      name.textContent = action.label;
+
+      const command = document.createElement('span');
+      command.className = 'custom-actions-settings-command';
+      command.textContent = this.buildCustomActionLaunchCommand(action);
+
+      text.append(name, command);
+
+      const actionsEl = document.createElement('div');
+      actionsEl.className = 'custom-actions-settings-buttons';
+
+      const select = document.createElement('button');
+      select.type = 'button';
+      select.className = 'btn-toolbar btn-sm';
+      select.textContent = 'Use';
+      select.addEventListener('click', () => this.setRunMode(`custom:${action.id}`));
+
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'btn-toolbar btn-sm';
+      edit.textContent = 'Edit';
+      edit.addEventListener('click', () => this.editCustomRunAction(action.id));
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'btn-toolbar btn-sm btn-danger';
+      remove.textContent = 'Delete';
+      remove.addEventListener('click', () => this.deleteCustomRunAction(action.id));
+
+      actionsEl.append(select, edit, remove);
+      row.append(text, actionsEl);
+      container.appendChild(row);
+    }
+  },
+
+  shellQuote(value) {
+    return `'${String(value).replace(/'/g, `'\\''`)}'`;
+  },
+
+  buildCustomActionLaunchCommand(action) {
+    const env = Array.isArray(action?.env) ? action.env : [];
+    const envParts = env
+      .filter(entry => /^[A-Za-z_][A-Za-z0-9_]*$/.test(entry.key || ''))
+      .map(entry => `${entry.key}=${this.shellQuote(entry.value || '')}`);
+    return envParts.length > 0 ? `env ${envParts.join(' ')} ${action.command}` : action.command;
+  },
+
+  getCustomRunActionEnvPresets() {
+    return [
+      {
+        group: 'Claude / Z.AI GLM',
+        items: [
+          { key: 'ANTHROPIC_BASE_URL', value: 'https://api.z.ai/api/anthropic', label: 'Z.AI Anthropic base URL' },
+          { key: 'ANTHROPIC_AUTH_TOKEN', label: 'Anthropic-compatible auth token' },
+          { key: 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', value: '1', label: 'Disable nonessential Claude traffic' },
+          { key: 'ANTHROPIC_MODEL', label: 'Claude model override' },
+          { key: 'ANTHROPIC_DEFAULT_SONNET_MODEL', label: 'Default Sonnet model' },
+          { key: 'ANTHROPIC_DEFAULT_OPUS_MODEL', label: 'Default Opus model' },
+          { key: 'ANTHROPIC_DEFAULT_HAIKU_MODEL', label: 'Default Haiku model' },
+          { key: 'API_TIMEOUT_MS', value: '3000000', label: 'Long API timeout' },
+        ],
+      },
+      {
+        group: 'Claude',
+        items: [
+          { key: 'ANTHROPIC_API_KEY', label: 'Anthropic API key' },
+          { key: 'CLAUDE_CONFIG_DIR', label: 'Claude config directory' },
+          { key: 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS', value: '1', label: 'Agent teams' },
+          { key: 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', label: 'Auto compact window' },
+        ],
+      },
+      {
+        group: 'Codex / OpenAI-compatible',
+        items: [
+          { key: 'OPENAI_API_KEY', label: 'OpenAI API key' },
+          { key: 'OPENAI_BASE_URL', label: 'OpenAI-compatible base URL' },
+          { key: 'OPENAI_ORG_ID', label: 'OpenAI organization' },
+          { key: 'OPENAI_PROJECT', label: 'OpenAI project' },
+          { key: 'CODEX_API_KEY', label: 'Codex API key' },
+          { key: 'CODEX_HOME', label: 'Codex home directory' },
+        ],
+      },
+      {
+        group: 'OpenCode / Providers',
+        items: [
+          { key: 'OPENCODE_API_KEY', label: 'OpenCode API key' },
+          { key: 'GEMINI_API_KEY', label: 'Gemini API key' },
+          { key: 'GOOGLE_API_KEY', label: 'Google API key' },
+          { key: 'GOOGLE_CLOUD_PROJECT', label: 'Google Cloud project' },
+          { key: 'GOOGLE_APPLICATION_CREDENTIALS', label: 'Google credentials file' },
+          { key: 'GOOGLE_GENAI_USE_VERTEXAI', value: '1', label: 'Use Vertex AI' },
+          { key: 'GROQ_API_KEY', label: 'Groq API key' },
+          { key: 'OPENROUTER_API_KEY', label: 'OpenRouter API key' },
+          { key: 'MISTRAL_API_KEY', label: 'Mistral API key' },
+          { key: 'DEEPSEEK_API_KEY', label: 'DeepSeek API key' },
+          { key: 'XAI_API_KEY', label: 'xAI API key' },
+          { key: 'PERPLEXITY_API_KEY', label: 'Perplexity API key' },
+          { key: 'AWS_ACCESS_KEY_ID', label: 'AWS access key ID' },
+          { key: 'AWS_SECRET_ACCESS_KEY', label: 'AWS secret access key' },
+          { key: 'AWS_PROFILE', label: 'AWS profile' },
+          { key: 'AWS_REGION', label: 'AWS region' },
+        ],
+      },
+      {
+        group: 'OpenClaw',
+        items: [
+          { key: 'OPENCLAW_LOAD_SHELL_ENV', value: '1', label: 'Load shell environment' },
+          { key: 'OPENCLAW_SHELL_ENV_TIMEOUT_MS', label: 'Shell env timeout' },
+          { key: 'OPENCLAW_OFFLINE', value: '1', label: 'Offline mode' },
+          { key: 'OPENCLAW_STATE_DIR', label: 'State directory' },
+          { key: 'OPENCLAW_THEME', label: 'Theme' },
+        ],
+      },
+    ];
+  },
+
+  renderCustomRunActionEnvMenu() {
+    const menu = document.getElementById('customRunActionEnvMenu');
+    if (!menu) return;
+    menu.replaceChildren();
+
+    const custom = document.createElement('button');
+    custom.type = 'button';
+    custom.className = 'custom-action-env-menu-item custom';
+    custom.innerHTML = '<span>Custom variable</span><small>Blank key and value</small>';
+    custom.addEventListener('click', () => this.addCustomRunActionEnvPreset({ key: '', value: '' }));
+    menu.appendChild(custom);
+
+    for (const group of this.getCustomRunActionEnvPresets()) {
+      const head = document.createElement('div');
+      head.className = 'custom-action-env-menu-head';
+      head.textContent = group.group;
+      menu.appendChild(head);
+
+      for (const preset of group.items) {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'custom-action-env-menu-item';
+
+        const label = document.createElement('span');
+        label.textContent = preset.label || preset.key;
+
+        const key = document.createElement('small');
+        key.textContent = preset.value ? `${preset.key}=${preset.value}` : preset.key;
+
+        item.append(label, key);
+        item.addEventListener('click', () => this.addCustomRunActionEnvPreset(preset));
+        menu.appendChild(item);
+      }
+    }
+  },
+
+  toggleCustomRunActionEnvMenu(event) {
+    event?.stopPropagation();
+    const menu = document.getElementById('customRunActionEnvMenu');
+    if (!menu) return;
+    this.renderCustomRunActionEnvMenu();
+    const wasActive = menu.classList.contains('active');
+    menu.classList.toggle('active', !wasActive);
+    if (wasActive) {
+      return;
+    }
+    if (!wasActive) {
+      setTimeout(() => {
+        const close = (ev) => {
+          if (!menu.contains(ev.target) && !ev.target.closest('.custom-action-env-add')) {
+            menu.classList.remove('active');
+            document.removeEventListener('click', close, true);
+          }
+        };
+        document.addEventListener('click', close, true);
+      }, 0);
+    }
+  },
+
+  addCustomRunAction() {
+    this.showCustomRunActionEditor();
+  },
+
+  editCustomRunAction(id) {
+    this.showCustomRunActionEditor(id);
+  },
+
+  deleteCustomRunAction(id) {
+    const actions = this.getCustomRunActions();
+    this.setCustomRunActions(actions.filter(action => action.id !== id));
+    if (this.runMode === `custom:${id}`) this.setRunMode('claude');
+  },
+
+  showCustomRunActionEditor(id = null) {
+    const modal = document.getElementById('customRunActionModal');
+    if (!modal) return;
+    const action = id ? this.getCustomRunActions().find(item => item.id === id) : null;
+    this._customRunActionEditingId = action?.id || null;
+    this._customRunActionEditorEnv = action?.env ? action.env.map(entry => ({ ...entry })) : [];
+
+    const title = document.getElementById('customRunActionTitle');
+    const label = document.getElementById('customRunActionLabel');
+    const command = document.getElementById('customRunActionCommand');
+    if (title) title.textContent = action ? 'Edit Custom Action' : 'Add Custom Action';
+    if (label) label.value = action?.label || '';
+    if (command) command.value = action?.command || 'claude';
+    this.renderCustomRunActionEnvEditor();
+    document.getElementById('runModeMenu')?.classList.remove('active');
+    modal.classList.add('active');
+    setTimeout(() => label?.focus(), 0);
+  },
+
+  closeCustomRunActionEditor() {
+    document.getElementById('customRunActionModal')?.classList.remove('active');
+    document.getElementById('customRunActionEnvMenu')?.classList.remove('active');
+    this._customRunActionEditingId = null;
+    this._customRunActionEditorEnv = [];
+  },
+
+  renderCustomRunActionEnvEditor() {
+    const list = document.getElementById('customRunActionEnvList');
+    if (!list) return;
+    const env = this._customRunActionEditorEnv || [];
+    if (env.length === 0) {
+      list.innerHTML = '<div class="custom-action-env-empty">No environment variables.</div>';
+      return;
+    }
+    list.replaceChildren();
+    env.forEach((entry, index) => {
+      const row = document.createElement('div');
+      row.className = 'set-row has-field custom-action-env-row';
+
+      const text = document.createElement('div');
+      text.className = 'set-row-text';
+
+      const label = document.createElement('span');
+      label.className = 'set-row-label';
+      label.textContent = `Variable ${index + 1}`;
+
+      const desc = document.createElement('span');
+      desc.className = 'set-row-desc';
+      desc.textContent = 'Exported only for this custom launch command.';
+
+      text.append(label, desc);
+
+      const key = document.createElement('input');
+      key.type = 'text';
+      key.className = 'set-input';
+      key.placeholder = 'ANTHROPIC_BASE_URL';
+      key.value = entry.key || '';
+      key.addEventListener('input', () => {
+        this._customRunActionEditorEnv[index].key = key.value;
+      });
+
+      const value = document.createElement('input');
+      value.type = 'text';
+      value.className = 'set-input';
+      value.placeholder = 'https://open.bigmodel.cn/api/anthropic';
+      value.value = entry.value || '';
+      value.addEventListener('input', () => {
+        this._customRunActionEditorEnv[index].value = value.value;
+      });
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'btn-toolbar btn-sm';
+      remove.textContent = 'Remove';
+      remove.addEventListener('click', () => {
+        this._customRunActionEditorEnv.splice(index, 1);
+        this.renderCustomRunActionEnvEditor();
+      });
+
+      const actions = document.createElement('div');
+      actions.className = 'set-row-actions custom-action-env-actions';
+      actions.append(key, value, remove);
+
+      row.append(text, actions);
+      list.appendChild(row);
+    });
+  },
+
+  addCustomRunActionEnvRow() {
+    this._customRunActionEditorEnv ||= [];
+    this._customRunActionEditorEnv.push({ key: '', value: '' });
+    this.renderCustomRunActionEnvEditor();
+  },
+
+  addCustomRunActionEnvPreset(preset) {
+    document.getElementById('customRunActionEnvMenu')?.classList.remove('active');
+    this._customRunActionEditorEnv ||= [];
+    this._customRunActionEditorEnv.push({
+      key: preset?.key || '',
+      value: preset?.value || '',
+    });
+    this.renderCustomRunActionEnvEditor();
+    const inputs = document.querySelectorAll('#customRunActionEnvList .custom-action-env-row:last-child .set-input');
+    const target = preset?.key ? inputs[1] : inputs[0];
+    setTimeout(() => target?.focus(), 0);
+  },
+
+  saveCustomRunActionFromEditor() {
+    const label = document.getElementById('customRunActionLabel')?.value.trim() || '';
+    const command = document.getElementById('customRunActionCommand')?.value.trim() || '';
+    if (!label) {
+      this.showToast('Custom action needs a name', 'error');
+      return;
+    }
+    if (!command) {
+      this.showToast('Custom action needs a command', 'error');
+      return;
+    }
+    if (/[\r\n]/.test(command)) {
+      this.showToast('Command must be a single line', 'error');
+      return;
+    }
+
+    const env = (this._customRunActionEditorEnv || [])
+      .map(entry => ({ key: String(entry.key || '').trim(), value: String(entry.value || '') }))
+      .filter(entry => entry.key || entry.value);
+    const invalid = env.find(entry => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(entry.key) || /[\r\n]/.test(entry.value));
+    if (invalid) {
+      this.showToast('Environment variable names must look like ANTHROPIC_BASE_URL', 'error');
+      return;
+    }
+
+    const actions = this.getCustomRunActions();
+    const editingId = this._customRunActionEditingId;
+    let id = editingId;
+    if (!id) {
+      const baseId = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'custom';
+      id = baseId;
+      for (let i = 2; actions.some(action => action.id === id); i++) id = `${baseId}-${i}`;
+    }
+    const next = editingId
+      ? actions.map(action => action.id === editingId ? { ...action, label, command, env } : action)
+      : [...actions, { id, label, command, env }];
+    this.setCustomRunActions(next);
+    this.setRunMode(`custom:${id}`);
+    this.closeCustomRunActionEditor();
+  },
+
   /** Ensure a newly-created session is visible without waiting for the SSE event.
    *  The POST response and session:created can arrive in either order, so the
    *  normal idempotent SSE handler remains the single state-upsert path. */
@@ -388,6 +829,9 @@ Object.assign(CodemanApp.prototype, {
 
     try {
       const mode = this._runMode || 'claude';
+      if (mode.startsWith('custom:')) {
+        return await this.runCustomAction(mode.slice('custom:'.length));
+      }
       if (mode === 'opencode') {
         return await this.runOpenCode();
       }
@@ -441,6 +885,7 @@ Object.assign(CodemanApp.prototype, {
     // Load history sessions when menu opens
     if (menu.classList.contains('active')) {
       this._loadRunModeHistory();
+      this.renderCustomRunActions();
       this._refreshRunModeAvailability(menu);
       const close = (ev) => {
         if (!menu.contains(ev.target)) {
@@ -552,17 +997,33 @@ Object.assign(CodemanApp.prototype, {
 
   _applyRunMode() {
     const mode = this.runMode;
+    const customAction = mode.startsWith('custom:')
+      ? this.getCustomRunActions().find(action => action.id === mode.slice('custom:'.length))
+      : null;
     const runBtn = document.getElementById('runBtn');
     const gearBtn = runBtn?.nextElementSibling;
     const label = document.getElementById('runBtnLabel');
+    const modeClass = customAction ? 'custom' : mode;
     if (runBtn) {
-      runBtn.className = `btn-toolbar btn-run mode-${mode}`;
+      runBtn.className = `btn-toolbar btn-run mode-${modeClass}`;
     }
     if (gearBtn) {
-      gearBtn.className = `btn-toolbar btn-run-gear mode-${mode}`;
+      gearBtn.className = `btn-toolbar btn-run-gear mode-${modeClass}`;
     }
     if (label) {
-      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : mode === 'antigravity' ? 'Run AG' : mode === 'shell' ? 'Run SH' : 'Run';
+      label.textContent = customAction
+        ? customAction.label.slice(0, 12)
+        : mode === 'opencode'
+          ? 'Run OC'
+          : mode === 'codex'
+            ? 'Run CX'
+            : mode === 'gemini'
+              ? 'Run GM'
+              : mode === 'antigravity'
+                ? 'Run AG'
+                : mode === 'shell'
+                  ? 'Run SH'
+                  : 'Run';
     }
   },
 
@@ -590,6 +1051,7 @@ Object.assign(CodemanApp.prototype, {
 
   _initRunMode() {
     try { this._runMode = localStorage.getItem('codeman_runMode') || 'claude'; } catch { this._runMode = 'claude'; }
+    this.renderCustomRunActions();
     this._applyRunMode();
   },
 
@@ -662,6 +1124,39 @@ Object.assign(CodemanApp.prototype, {
       this.terminal.writeln(`\x1b[1;31m Error: ${message}\x1b[0m`);
     } else {
       this.showToast?.(message, 'error');
+    }
+  },
+
+  async runCustomAction(actionId) {
+    const action = this.getCustomRunActions().find(item => item.id === actionId);
+    if (!action) {
+      this.showToast('Custom action not found', 'error');
+      this.setRunMode('claude');
+      return;
+    }
+
+    const caseName = document.getElementById('quickStartCase').value || 'testcase';
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting ${action.label} in ${caseName}...`, '1;33');
+    this.terminal.focus();
+
+    try {
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caseName,
+          mode: 'shell',
+          launchCommand: this.buildCustomActionLaunchCommand(action),
+          sessionName: `x${this._nextCaseSessionStartNumber(caseName, 'x')}-${caseName}`,
+        })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || `Failed to start ${action.label}`);
+      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+      if (data.data.sessionId) await this.selectSession(data.data.sessionId);
+      this.terminal.focus();
+    } catch (err) {
+      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
     }
   },
 
@@ -2951,8 +3446,16 @@ Object.defineProperty(CodemanApp.prototype, 'runMode', {
     return this._runMode || 'claude';
   },
   set(mode) {
+    const customId = typeof mode === 'string' && mode.startsWith('custom:') ? mode.slice('custom:'.length) : '';
+    const customExists = customId && this.getCustomRunActions?.().some(action => action.id === customId);
     this._runMode =
-      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity' || mode === 'claude'
+      mode === 'opencode' ||
+      mode === 'codex' ||
+      mode === 'gemini' ||
+      mode === 'antigravity' ||
+      mode === 'shell' ||
+      mode === 'claude' ||
+      customExists
         ? mode
         : 'claude';
   },
