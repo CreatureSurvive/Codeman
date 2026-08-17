@@ -67,21 +67,29 @@ async function proxyFetch(
   const requestHeaders = req.headers as Record<string, string | string[] | undefined>;
   if (requestHeaders.accept)
     headers.set('Accept', Array.isArray(requestHeaders.accept) ? requestHeaders.accept[0] : requestHeaders.accept);
-  if (requestHeaders['content-type'] && req.body !== undefined) {
+  if (requestHeaders['content-type']) {
     headers.set(
       'Content-Type',
       Array.isArray(requestHeaders['content-type']) ? requestHeaders['content-type'][0] : requestHeaders['content-type']
     );
   }
+  if (req.method !== 'GET' && req.method !== 'HEAD') headers.set('X-Codeman-CSRF', 'node-proxy');
 
-  let body: string | Buffer | undefined;
-  if (req.method !== 'GET' && req.method !== 'HEAD' && req.body !== undefined) {
-    body = typeof req.body === 'string' || req.body instanceof Buffer ? req.body : JSON.stringify(req.body);
-    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  let body: string | Buffer | NodeJS.ReadableStream | undefined;
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    const contentType = headers.get('Content-Type') || '';
+    if (contentType.includes('multipart/form-data')) {
+      body = req.raw;
+    } else if (req.body !== undefined) {
+      body = typeof req.body === 'string' || req.body instanceof Buffer ? req.body : JSON.stringify(req.body);
+      if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+    }
   }
 
   try {
-    const upstream = await fetch(url, { method: req.method, headers, body });
+    const init: RequestInit & { duplex?: 'half' } = { method: req.method, headers, body: body as RequestInit['body'] };
+    if (body && typeof body !== 'string' && !Buffer.isBuffer(body)) init.duplex = 'half';
+    const upstream = await fetch(url, init);
     reply.code(upstream.status);
     upstream.headers.forEach((value, key) => {
       const lower = key.toLowerCase();
@@ -143,7 +151,7 @@ async function testNode(nodeId: string): Promise<{ ok: boolean; status?: number;
   }
 }
 
-function bridgeWebSockets(browser: WebSocket, nodeId: string, sessionId: string): void {
+function bridgeWebSockets(browser: WebSocket, nodeId: string, sessionId: string, cid?: string): void {
   void (async () => {
     const node = await getNode(nodeId);
     if (!node || !node.enabled) {
@@ -153,7 +161,7 @@ function bridgeWebSockets(browser: WebSocket, nodeId: string, sessionId: string)
     const base = new URL(node.baseUrl);
     base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
     base.pathname = `/ws/sessions/${encodeURIComponent(sessionId)}/terminal`;
-    base.search = '';
+    base.search = cid ? `?cid=${encodeURIComponent(cid)}` : '';
     const remote = new WsClient(base, { headers: node.token ? { Authorization: `Bearer ${node.token}` } : undefined });
 
     const closeBoth = (code?: number, reason?: Buffer) => {
@@ -330,7 +338,7 @@ export function registerNodeRoutes(app: FastifyInstance, options: NodeRouteOptio
     '/ws/nodes/:nodeId/sessions/:id/terminal',
     { websocket: true },
     (socket: WebSocket, req) => {
-      bridgeWebSockets(socket, req.params.nodeId, req.params.id);
+      bridgeWebSockets(socket, req.params.nodeId, req.params.id, req.query.cid);
     }
   );
 }

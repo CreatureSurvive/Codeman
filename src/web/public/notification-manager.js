@@ -367,6 +367,12 @@ class NotificationManager {
   // Layer 3: Web Notification API
   sendBrowserNotif(title, body, tag, sessionId) {
     if (!this.preferences.browserNotifications) return;
+    if (window.CodemanNative?.notify) {
+      const localizedTitle = window.codemanT?.(title) || title;
+      const localizedBody = window.codemanT?.(body) || body;
+      window.CodemanNative.notify(`${this.originalTitle}: ${localizedTitle}`, localizedBody, { tag, sessionId }).catch(() => {});
+      return;
+    }
     if (typeof Notification === 'undefined') return;
     if (Notification.permission === 'default') {
       // Auto-request on first notification attempt
@@ -407,6 +413,24 @@ class NotificationManager {
   }
 
   async requestPermission() {
+    if (window.CodemanNative?.requestNotificationPermissions) {
+      try {
+        const result = await window.CodemanNative.requestNotificationPermissions();
+        const granted = result?.display === 'granted' || result?.receive === 'granted';
+        const statusEl = document.getElementById('notifPermissionStatus');
+        if (statusEl) statusEl.textContent = `Status: ${granted ? 'granted' : 'denied'}`;
+        if (granted) {
+          this.preferences.browserNotifications = true;
+          this.savePreferences();
+          this.app.showToast('Notifications enabled', 'success');
+        } else {
+          this.app.showToast('Permission denied', 'warning');
+        }
+      } catch {
+        this.app.showToast('Native notifications not available', 'warning');
+      }
+      return;
+    }
     if (typeof Notification === 'undefined') {
       this.app.showToast('Browser notifications not supported', 'warning');
       return;

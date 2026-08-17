@@ -88,6 +88,7 @@ const PathPicker = {
           <label for="pathPickerRoot">Location</label>
           <select id="pathPickerRoot" class="path-picker-roots"></select>
         </div>
+        <div class="path-picker-root-chips" aria-label="Browse locations"></div>
         <div class="path-picker-nav">
           <button type="button" class="path-picker-up" title="Parent folder" aria-label="Parent folder">&#x2191;</button>
           <div class="path-picker-current" title="Current folder"></div>
@@ -210,6 +211,19 @@ const PathPicker = {
       option.textContent = `${root.label} — ${root.path}`;
       option.selected = data.path === root.path || data.root === root.path;
       rootSelect.appendChild(option);
+    }
+
+    const chips = this.overlay.querySelector('.path-picker-root-chips');
+    chips.replaceChildren();
+    for (const root of data.roots) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'path-picker-root-chip';
+      button.textContent = root.label;
+      button.title = root.path;
+      button.classList.toggle('active', data.root === root.path || data.path === root.path);
+      button.addEventListener('click', () => this.load(root.path));
+      chips.appendChild(button);
     }
 
     this.overlay.querySelector('.path-picker-current').textContent = data.path;
@@ -925,9 +939,8 @@ const KeyboardAccessoryBar = {
   /** Show a paste overlay for iOS compatibility.
    *  Handles three input paths from one dialog:
    *   - Text: long-press the textarea → Paste → Send (unchanged).
-   *   - Image (picker): the "Image" button opens a native file picker
-   *     (accept=image/* → camera / photo library / files), the most reliable
-   *     way to attach a photo on mobile.
+   *   - Image (picker): the "Image" button opens the native system picker
+   *     when available, granting access only to the selected images.
    *   - Image (paste): if the browser exposes image blobs on the textarea's
    *     paste event, we intercept them and upload directly. Support is spotty
    *     on mobile, so it is a best-effort enhancement layered on the picker.
@@ -975,8 +988,49 @@ const KeyboardAccessoryBar = {
       return true;
     };
 
-    // Image picker (camera / photo library) — the reliable mobile path.
-    overlay.querySelector('.paste-image').addEventListener('click', () => fileInput.click());
+    const nativePhotoToFile = async (photo, index) => {
+      if (!photo) return null;
+      const format = (photo.format || 'jpeg').toLowerCase();
+      const extension = format === 'png' ? 'png' : 'jpg';
+      const mime = format === 'png' ? 'image/png' : 'image/jpeg';
+      if (photo.webPath || photo.path) {
+        const url = photo.webPath || window.Capacitor?.convertFileSrc?.(photo.path);
+        if (url) {
+          const response = await fetch(url);
+          if (response.ok) {
+            const blob = await response.blob();
+            return new File([blob], `codeman-photo-${index + 1}.${extension}`, { type: blob.type || mime });
+          }
+        }
+      }
+      if (!photo.base64String) return null;
+      const binary = atob(photo.base64String);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new File([bytes], `codeman-photo-${index + 1}.${extension}`, { type: mime });
+    };
+    const isPickerCancel = (error) => /cancel|cancelled|canceled|dismiss|no image/i.test(String(error?.message || error || ''));
+
+    // Image picker — use Capacitor's system photo picker when available. This
+    // does not request library-wide permission; the selected images are the
+    // only assets the app can read. Browser file input remains the fallback.
+    overlay.querySelector('.paste-image').addEventListener('click', async () => {
+      if (!window.CodemanNative?.pickImages && !window.CodemanNative?.pickImage) {
+        fileInput.click();
+        return;
+      }
+      try {
+        const result = window.CodemanNative.pickImages
+          ? await window.CodemanNative.pickImages({ limit: app._maxBatchImages || 20 })
+          : { photos: [await window.CodemanNative.pickImage({ allowEditing: false })] };
+        const files = (await Promise.all((result?.photos || []).map(nativePhotoToFile))).filter(Boolean);
+        if (files.length > 0) handleImages(files);
+      } catch (error) {
+        if (isPickerCancel(error)) return;
+        console.warn('Native image picker failed, falling back to file input:', error);
+        fileInput.click();
+      }
+    });
     fileInput.addEventListener('change', () => handleImages(fileInput.files));
 
     // Best-effort: capture images pasted straight into the textarea.

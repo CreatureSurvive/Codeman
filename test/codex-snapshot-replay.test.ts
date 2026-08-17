@@ -61,6 +61,48 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
     expect(postSnapshotRestore).toContain('restoredSnapshot || clearedForBusy || data.terminalBuffer !== cachedBuffer');
   });
 
+  it('uses full-history terminal replay for mobile resume repair', () => {
+    const source = appSource();
+    const terminalSource = readFileSync(resolve(import.meta.dirname, '../src/web/public/terminal-ui.js'), 'utf8');
+    const refreshStart = source.indexOf('async _onSessionNeedsRefresh(event = {})');
+    const refreshEnd = source.indexOf('async _onSessionClearTerminal', refreshStart);
+    const resumeStart = terminalSource.indexOf('_scheduleTerminalResumeRepair(reason)');
+    const resumeEnd = terminalSource.indexOf(
+      '// ═══════════════════════════════════════════════════════════════',
+      resumeStart
+    );
+    const refreshBlock = source.slice(refreshStart, refreshEnd);
+    const resumeBlock = terminalSource.slice(resumeStart, resumeEnd);
+
+    expect(refreshStart).toBeGreaterThan(-1);
+    expect(resumeStart).toBeGreaterThan(-1);
+    expect(refreshBlock).toContain('full: event?.full === true');
+    expect(resumeBlock).toContain('full: true');
+  });
+
+  it('debounces live client-drop recovery and replays full history', () => {
+    const source = appSource();
+    const terminalStart = source.indexOf('_onSessionTerminal(data)');
+    const terminalEnd = source.indexOf(
+      '// ═══════════════════════════════════════════════════════════════',
+      terminalStart
+    );
+    const recoveryStart = source.indexOf('_scheduleClientDropRecovery(sessionId)');
+    const recoveryEnd = source.indexOf(
+      '// ═══════════════════════════════════════════════════════════════',
+      recoveryStart
+    );
+    const terminalBlock = source.slice(terminalStart, terminalEnd);
+    const recoveryBlock = source.slice(recoveryStart, recoveryEnd);
+
+    expect(terminalStart).toBeGreaterThan(-1);
+    expect(recoveryStart).toBeGreaterThan(-1);
+    expect(terminalBlock).toContain('this._scheduleClientDropRecovery(data.id)');
+    expect(recoveryBlock).toContain("this._clearTimer('_clientDropRecoveryTimer')");
+    expect(recoveryBlock).toContain("reason: 'client-drop'");
+    expect(recoveryBlock).toContain('full: true');
+  });
+
   it('forces replay after clearing a busy tab even when the fetched frame matches cache', () => {
     const source = appSource();
     const cacheRestore = source.indexOf('Instant cache restore');

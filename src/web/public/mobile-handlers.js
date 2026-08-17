@@ -85,6 +85,20 @@ const MobileDetection = {
     return /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
   },
 
+  /** Check if the app is running from an installed PWA/home-screen shell */
+  isStandalonePwa() {
+    return (
+      window.matchMedia?.('(display-mode: standalone)').matches ||
+      window.matchMedia?.('(display-mode: fullscreen)').matches ||
+      window.navigator.standalone === true
+    );
+  },
+
+  /** Check if the page is running inside a native Capacitor shell */
+  isNativeShell() {
+    return !!window.Capacitor || document.documentElement.classList.contains('codeman-native');
+  },
+
   /** Check if screen is small (phone-sized, <430px) */
   isSmallScreen() {
     return window.innerWidth < 430;
@@ -116,7 +130,9 @@ const MobileDetection = {
       'device-desktop',
       'touch-device',
       'ios-device',
-      'safari-browser'
+      'safari-browser',
+      'pwa-standalone',
+      'codeman-native'
     );
 
     // Add current device class
@@ -136,6 +152,15 @@ const MobileDetection = {
     if (this.isSafari()) {
       body.classList.add('safari-browser');
     }
+
+    if (this.isStandalonePwa()) {
+      body.classList.add('pwa-standalone');
+    }
+
+    if (this.isNativeShell()) {
+      body.classList.add('codeman-native');
+      document.documentElement.classList.add('codeman-native');
+    }
   },
 
   /** Set --app-height CSS variable from visual viewport.
@@ -146,8 +171,11 @@ const MobileDetection = {
    *  would double-count and leave zero space for the terminal. */
   updateAppHeight() {
     if (typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible) return;
-    const vh = window.visualViewport?.height || window.innerHeight;
+    const viewport = window.visualViewport;
+    const vh = viewport?.height || window.innerHeight;
+    const top = viewport?.offsetTop || 0;
     document.documentElement.style.setProperty('--app-height', `${vh}px`);
+    document.documentElement.style.setProperty('--app-top', `${top}px`);
   },
 
   /** Initialize mobile detection and set up resize listener */
@@ -159,6 +187,7 @@ const MobileDetection = {
     if (window.visualViewport) {
       this._appHeightHandler = () => this.updateAppHeight();
       window.visualViewport.addEventListener('resize', this._appHeightHandler);
+      window.visualViewport.addEventListener('scroll', this._appHeightHandler);
     }
 
     // Debounced resize handler
@@ -196,6 +225,11 @@ const MobileDetection = {
       this._gestureStartHandler = null;
       this._gestureChangeHandler = null;
     }
+    if (this._appHeightHandler && window.visualViewport) {
+      window.visualViewport.removeEventListener('resize', this._appHeightHandler);
+      window.visualViewport.removeEventListener('scroll', this._appHeightHandler);
+      this._appHeightHandler = null;
+    }
   },
 };
 
@@ -216,6 +250,9 @@ const KeyboardHandler = {
   _viewportSettleTimer: null,
   _settleScrollToBottom: false,
   _settlePending: false,
+  _nativeKeyboardHeight: 0,
+  _nativeKeyboardListeners: [],
+  _nativeKeyboardListenerPromises: [],
 
   /** Initialize keyboard handling */
   init() {
@@ -257,6 +294,33 @@ const KeyboardHandler = {
       window.visualViewport.addEventListener('scroll', this._viewportScrollHandler);
     }
 
+    const nativeKeyboard = window.Capacitor?.Plugins?.Keyboard;
+    if (MobileDetection.isNativeShell?.() && nativeKeyboard?.addListener) {
+      const addNativeListener = (eventName, handler) => {
+        try {
+          const result = nativeKeyboard.addListener(eventName, handler);
+          if (result && typeof result.then === 'function') {
+            this._nativeKeyboardListenerPromises.push(
+              result
+                .then((listener) => {
+                  if (listener) this._nativeKeyboardListeners.push(listener);
+                  return listener;
+                })
+                .catch(() => null)
+            );
+          } else if (result) {
+            this._nativeKeyboardListeners.push(result);
+          }
+        } catch {
+          // VisualViewport remains the fallback when native keyboard events fail.
+        }
+      };
+      addNativeListener('keyboardWillShow', (info) => this.handleNativeKeyboardShow(info));
+      addNativeListener('keyboardDidShow', (info) => this.handleNativeKeyboardShow(info));
+      addNativeListener('keyboardWillHide', () => this.handleNativeKeyboardHide());
+      addNativeListener('keyboardDidHide', () => this.handleNativeKeyboardHide());
+    }
+
     // Prevent page-level scroll when keyboard is visible.
     // iOS Safari scrolls the document to bring xterm's hidden textarea into
     // view when the user types, pushing the entire UI off-screen. The CSS
@@ -267,6 +331,14 @@ const KeyboardHandler = {
       }
     };
     window.addEventListener('scroll', this._windowScrollHandler);
+
+    this._orientationHandler = () => this.handleOrientationChange();
+    window.addEventListener('orientationchange', this._orientationHandler);
+    try {
+      screen.orientation?.addEventListener?.('change', this._orientationHandler);
+    } catch {
+      // Older iOS only supports window.orientationchange.
+    }
   },
 
   /** Remove event listeners */
@@ -291,6 +363,31 @@ const KeyboardHandler = {
       window.removeEventListener('scroll', this._windowScrollHandler);
       this._windowScrollHandler = null;
     }
+    if (this._orientationHandler) {
+      window.removeEventListener('orientationchange', this._orientationHandler);
+      try {
+        screen.orientation?.removeEventListener?.('change', this._orientationHandler);
+      } catch {}
+      this._orientationHandler = null;
+    }
+    for (const listener of this._nativeKeyboardListeners) {
+      try {
+        listener?.remove?.();
+      } catch {}
+    }
+    this._nativeKeyboardListeners = [];
+    for (const pending of this._nativeKeyboardListenerPromises) {
+      pending
+        .then((listener) => {
+          try {
+            listener?.remove?.();
+          } catch {}
+        })
+        .catch(() => {});
+    }
+    this._nativeKeyboardListenerPromises = [];
+    this._nativeKeyboardHeight = 0;
+    document.documentElement.style.removeProperty('--native-keyboard-height');
     if (this._viewportSettleTimer) {
       clearTimeout(this._viewportSettleTimer);
       this._viewportSettleTimer = null;
@@ -299,10 +396,111 @@ const KeyboardHandler = {
     this._settlePending = false;
   },
 
+  handleNativeKeyboardShow(info = {}) {
+    const keyboardHeight = Math.max(0, Number(info.keyboardHeight) || 0);
+    this._nativeKeyboardHeight = keyboardHeight;
+    document.documentElement.style.setProperty('--native-keyboard-height', `${keyboardHeight}px`);
+    if (!this.keyboardVisible) {
+      this.keyboardVisible = true;
+      document.body.classList.add('keyboard-visible');
+      this.onKeyboardShow();
+    }
+    const viewportHeight = window.visualViewport?.height || window.innerHeight;
+    if (keyboardHeight > 0) {
+      const eventBasedHeight = Math.max(1, this.initialViewportHeight - keyboardHeight);
+      this._setKeyboardAppHeight(Math.min(viewportHeight, eventBasedHeight));
+      document.documentElement.style.setProperty('--app-top', '0px');
+    }
+    this.updateLayoutForKeyboard();
+    this.scrollFocusedInputIntoView();
+    this._deferViewportSettle();
+  },
+
+  handleNativeKeyboardHide() {
+    this._nativeKeyboardHeight = 0;
+    document.documentElement.style.removeProperty('--native-keyboard-height');
+    if (this.keyboardVisible) {
+      this.keyboardVisible = false;
+      document.body.classList.remove('keyboard-visible');
+      this.onKeyboardHide();
+    }
+    MobileDetection.updateAppHeight();
+  },
+
+  _keyboardOffsetForViewport() {
+    const viewport = window.visualViewport;
+    const layoutHeight = window.innerHeight;
+    const visualBottom = (viewport?.offsetTop || 0) + (viewport?.height || layoutHeight);
+    const viewportOffset = Math.max(0, layoutHeight - visualBottom);
+    const viewportShrink = Math.max(0, this.initialViewportHeight - (viewport?.height || layoutHeight));
+    const nativeOffset = viewportShrink > 100 ? 0 : this._nativeKeyboardHeight || 0;
+    return Math.max(0, viewportOffset, nativeOffset);
+  },
+
+  _isNativeKeyboardLayout() {
+    return (
+      document.body.classList.contains('codeman-native') ||
+      document.documentElement.classList.contains('codeman-native')
+    );
+  },
+
+  _setKeyboardAppHeight(height) {
+    const reserve = this._isNativeKeyboardLayout() ? 44 : 0;
+    document.documentElement.style.setProperty('--app-height', `${Math.max(1, height - reserve)}px`);
+  },
+
+  handleOrientationChange() {
+    const refresh = () => {
+      if (!MobileDetection.isTouchDevice()) return;
+      if (!this.keyboardVisible && this._hasKeyboardFocus()) {
+        this.keyboardVisible = true;
+        document.body.classList.add('keyboard-visible');
+        this.onKeyboardShow();
+      }
+      if (!this.keyboardVisible) {
+        this.initialViewportHeight = window.visualViewport?.height || window.innerHeight;
+        MobileDetection.updateAppHeight();
+        return;
+      }
+
+      const viewport = window.visualViewport;
+      const layoutHeight = window.innerHeight;
+      const visualHeight = viewport?.height || layoutHeight;
+      const visualBottom = (viewport?.offsetTop || 0) + visualHeight;
+      const viewportKeyboard = Math.max(0, layoutHeight - visualBottom);
+
+      if (viewportKeyboard > 100) {
+        this._nativeKeyboardHeight = 0;
+        document.documentElement.style.removeProperty('--native-keyboard-height');
+        this._setKeyboardAppHeight(visualHeight);
+      } else if (this._nativeKeyboardHeight > 0) {
+        const landscape = window.innerWidth > window.innerHeight;
+        const expected = Math.round(layoutHeight * (landscape ? 0.45 : 0.38));
+        const maxKeyboard = Math.round(layoutHeight * 0.55);
+        this._nativeKeyboardHeight = Math.max(
+          120,
+          Math.min(maxKeyboard, Math.max(this._nativeKeyboardHeight, expected))
+        );
+        document.documentElement.style.setProperty('--native-keyboard-height', `${this._nativeKeyboardHeight}px`);
+        this._setKeyboardAppHeight(Math.max(1, layoutHeight - this._nativeKeyboardHeight));
+      } else {
+        this._setKeyboardAppHeight(visualHeight);
+      }
+
+      document.documentElement.style.setProperty('--app-top', `${viewport?.offsetTop || 0}px`);
+      this.updateLayoutForKeyboard();
+      this.scrollFocusedInputIntoView();
+      this._scheduleViewportSettle({ scrollToBottom: true });
+    };
+
+    [80, 250, 600, 1000].forEach((delay) => setTimeout(refresh, delay));
+  },
+
   /** Handle viewport resize (keyboard show/hide) */
   handleViewportResize() {
     const currentHeight = window.visualViewport?.height || window.innerHeight;
     const heightDiff = this.initialViewportHeight - currentHeight;
+    const focusedKeyboardInput = this._hasKeyboardFocus();
 
     // Keyboard appeared (viewport shrunk by more than 150px)
     if (heightDiff > 150 && !this.keyboardVisible) {
@@ -310,13 +508,14 @@ const KeyboardHandler = {
       document.body.classList.add('keyboard-visible');
       // While the keyboard is open, size the app to the visual viewport so
       // xterm's bottom row and cursor sit above the OS keyboard.
-      document.documentElement.style.setProperty('--app-height', `${currentHeight}px`);
+      this._setKeyboardAppHeight(currentHeight);
+      document.documentElement.style.setProperty('--app-top', `${window.visualViewport?.offsetTop || 0}px`);
       this.onKeyboardShow();
     }
     // Keyboard hidden (viewport grew back close to initial)
     // Use 100px threshold (not 50) to handle iOS address bar drift,
     // iOS 26's persistent 24px discrepancy, and Safari bottom bar changes
-    else if (heightDiff < 100 && this.keyboardVisible) {
+    else if (heightDiff < 100 && this.keyboardVisible && !focusedKeyboardInput && this._nativeKeyboardHeight <= 0) {
       this.keyboardVisible = false;
       document.body.classList.remove('keyboard-visible');
       this.onKeyboardHide();
@@ -330,7 +529,8 @@ const KeyboardHandler = {
     if (!this.keyboardVisible) {
       this.initialViewportHeight = currentHeight;
     } else {
-      document.documentElement.style.setProperty('--app-height', `${currentHeight}px`);
+      this._setKeyboardAppHeight(currentHeight);
+      document.documentElement.style.setProperty('--app-top', `${window.visualViewport?.offsetTop || 0}px`);
     }
 
     this.updateLayoutForKeyboard();
@@ -349,7 +549,8 @@ const KeyboardHandler = {
     }
 
     const cjkInput = document.getElementById('cjkInput');
-    const isSmallMedium = MobileDetection.isSmallScreen() || MobileDetection.isMediumScreen();
+    const isHandheldLandscape = MobileDetection.isHandheldDevice?.() && window.innerHeight < 520;
+    const isSmallMedium = MobileDetection.isSmallScreen() || MobileDetection.isMediumScreen() || isHandheldLandscape;
 
     if (this.keyboardVisible) {
       const keyboardHeight = this.initialViewportHeight - (window.visualViewport.height || window.innerHeight);
@@ -361,9 +562,7 @@ const KeyboardHandler = {
         const toolbar = document.querySelector('.toolbar');
         const main = document.querySelector('.main');
 
-        const layoutHeight = window.innerHeight;
-        const visualBottom = window.visualViewport.offsetTop + window.visualViewport.height;
-        const keyboardOffset = Math.max(0, layoutHeight - visualBottom);
+        const keyboardOffset = this._keyboardOffsetForViewport();
 
         if (toolbar) {
           toolbar.style.transform = keyboardOffset > 0 ? `translateY(${-keyboardOffset}px)` : '';
@@ -371,9 +570,10 @@ const KeyboardHandler = {
         if (accessoryBar) {
           accessoryBar.style.transform = keyboardOffset > 0 ? `translateY(${-keyboardOffset}px)` : '';
         }
-        if (main && keyboardHeight > 0) {
+        if (main) {
           const cjkInputHeight = cjkInput?.classList.contains('cjk-input-visible') ? 44 : 0;
-          main.style.paddingBottom = `${84 + cjkInputHeight}px`;
+          const baseChromeHeight = this._isNativeKeyboardLayout() ? 0 : 84;
+          main.style.paddingBottom = `calc(${baseChromeHeight + cjkInputHeight}px + var(--safe-area-bottom))`;
         }
       } else if (keyboardHeight > 0) {
         // iPad: use direct bottom positioning (translateY unreliable —
@@ -387,9 +587,7 @@ const KeyboardHandler = {
       if (cjkInput?.classList.contains('cjk-input-visible') && keyboardHeight > 0) {
         if (isSmallMedium) {
           // Phones: use translateY like toolbar/accessory bar.
-          const layoutHeight = window.innerHeight;
-          const visualBottom = window.visualViewport.offsetTop + window.visualViewport.height;
-          const keyboardOffset = Math.max(0, layoutHeight - visualBottom);
+          const keyboardOffset = this._keyboardOffsetForViewport();
           cjkInput.style.transform = keyboardOffset > 0 ? `translateY(${-keyboardOffset}px)` : '';
           cjkInput.style.bottom = '';
         } else {
@@ -571,6 +769,17 @@ const KeyboardHandler = {
       }
     }
     return tagName === 'input' || tagName === 'textarea' || el.isContentEditable;
+  },
+
+  _hasKeyboardFocus() {
+    const el = document.activeElement;
+    if (!el) return false;
+    const tagName = el.tagName?.toLowerCase();
+    if (tagName === 'input') {
+      const type = el.type?.toLowerCase();
+      return type !== 'checkbox' && type !== 'radio' && type !== 'range' && type !== 'file';
+    }
+    return tagName === 'textarea' || el.isContentEditable;
   },
 
   /** Scroll input into view above the keyboard */

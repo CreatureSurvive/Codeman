@@ -165,6 +165,14 @@ const ERASE_SCROLLBACK_PATTERN = /\x1b\[3J/g;
 // eslint-disable-next-line no-control-regex
 const MOUSE_TRACKING_PATTERN = /\x1b\[\?(?:1000|1001|1002|1003|1005|1006|1007)[hl]/g;
 
+function shouldStripInkReplay(session: Session): boolean {
+  return session.mode !== 'shell' || session.usesClaudeLikeTerminal;
+}
+
+function shouldStripFullScreenReplay(session: Session): boolean {
+  return isAltScreenStripMode(session.mode) || session.usesClaudeLikeTerminal;
+}
+
 /**
  * Strip redundant Ink spinner/status-bar redraw frames from the terminal buffer.
  * Ink (Claude Code's TUI) uses absolute cursor positioning (CSI n d = VPA) to animate
@@ -2266,13 +2274,13 @@ export function registerSessionRoutes(
     // During long thinking phases, Ink rewrites the same rows thousands of times
     // (500KB+). Without stripping, tail mode returns only spinner frames and
     // the terminal appears empty when switching tabs.
-    let strippedBuffer = session.mode === 'shell' ? rawBuffer : stripInkRedrawBloat(rawBuffer);
+    let strippedBuffer = shouldStripInkReplay(session) ? stripInkRedrawBloat(rawBuffer) : rawBuffer;
 
     // Strip alt-screen toggles and scrollback-erase from Codex/Claude byte
     // streams. xterm.js obeys them by switching to its scrollback-less alt
     // buffer and wiping saved lines, so conversation history disappears on tab
     // switch. Same gate as the live-stream strip in session.ts.
-    if (isAltScreenStripMode(session.mode)) {
+    if (shouldStripFullScreenReplay(session)) {
       strippedBuffer = strippedBuffer
         .replace(ALT_SCREEN_TOGGLE_PATTERN, '')
         .replace(ERASE_SCROLLBACK_PATTERN, '')

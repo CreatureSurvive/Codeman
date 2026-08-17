@@ -68,7 +68,7 @@ html.mobile-init .file-browser-panel {
   }
 
   /* iOS safe area adjustment for fixed header - header extends into notch area */
-  .ios-device .header {
+  :is(.ios-device, .codeman-native) .header {
     padding-top: calc(0.35rem + var(--safe-area-top));
     min-height: calc(48px + var(--safe-area-top));
     max-height: calc(48px + var(--safe-area-top));
@@ -80,7 +80,7 @@ html.mobile-init .file-browser-panel {
     padding-top: 54px;
   }
 
-  .ios-device .app {
+  :is(.ios-device, .codeman-native) .app {
     padding-top: calc(54px + var(--safe-area-top));
   }
 
@@ -449,7 +449,7 @@ html.mobile-init .file-browser-panel {
   }
 
   /* iOS safe area adjustment for fixed header - header extends into notch area */
-  .ios-device .header {
+  :is(.ios-device, .codeman-native) .header {
     padding-top: calc(0.15rem + var(--safe-area-top));
     min-height: calc(var(--header-height) + var(--safe-area-top));
     max-height: calc(var(--header-height) + var(--safe-area-top));
@@ -467,7 +467,7 @@ html.mobile-init .file-browser-panel {
     padding-top: calc(var(--header-height) + 6px);
   }
 
-  .ios-device .app {
+  :is(.ios-device, .codeman-native) .app {
     padding-top: calc(var(--header-height) + 6px + var(--safe-area-top));
   }
 
@@ -475,11 +475,8 @@ html.mobile-init .file-browser-panel {
     padding-bottom: calc(40px + var(--safe-area-bottom));
   }
 
-  /* iOS Safari: toolbar is pushed up by (100vh - --app-height) to clear the
-     browser's bottom bar. Match that offset in main's padding so the terminal
-     doesn't extend behind the toolbar. */
-  .ios-device.safari-browser .main {
-    padding-bottom: calc(40px + var(--safe-area-bottom) + (100vh - var(--app-height, 100vh)));
+  :is(.ios-device.safari-browser, .codeman-native) .main {
+    padding-bottom: calc(40px + var(--safe-area-bottom));
   }
 
   .header-right {
@@ -487,6 +484,126 @@ html.mobile-init .file-browser-panel {
     gap: 0.1rem;
     flex-shrink: 0;
     border-left: none;
+  }
+
+  .node-selector {
+    flex: 0 1 auto;
+    width: 32px;
+    max-width: 32px;
+    height: 32px;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .node-selector > span {
+    display: none;
+  }
+
+  .node-selector > select {
+    display: none;
+  }
+
+  .node-selector-mobile-trigger {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--accent);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .node-selector-mobile-trigger::after {
+    content: '';
+    position: absolute;
+    right: 3px;
+    bottom: 4px;
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--green);
+    box-shadow: 0 0 0 2px #0a0a0a;
+  }
+
+  .node-selector-mobile-trigger:active,
+  .node-selector-mobile-trigger[aria-expanded="true"] {
+    background: rgba(var(--accent-rgb), 0.14);
+  }
+
+  .node-selector-menu {
+    position: fixed;
+    top: calc(var(--header-height) + 8px + var(--safe-area-top));
+    right: calc(8px + var(--safe-area-right));
+    display: flex;
+    flex-direction: column;
+    width: min(220px, calc(100vw - 16px - var(--safe-area-left) - var(--safe-area-right)));
+    max-height: min(300px, calc(100dvh - var(--header-height) - 24px - var(--safe-area-top)));
+    overflow-y: auto;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--floating-bg);
+    box-shadow: var(--elevated-shadow);
+    z-index: 1500;
+  }
+
+  .node-selector-menu[hidden] {
+    display: none;
+  }
+
+  .node-selector-menu-item {
+    display: grid;
+    grid-template-columns: 10px minmax(0, 1fr) 18px;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 38px;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 0.8rem;
+    text-align: left;
+  }
+
+  .node-selector-menu-item:active,
+  .node-selector-menu-item.selected {
+    background: rgba(var(--accent-rgb), 0.14);
+  }
+
+  .node-selector-menu-item:disabled {
+    opacity: 0.45;
+  }
+
+  .node-selector-menu-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--green);
+  }
+
+  .node-selector-menu-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .node-selector-menu-check {
+    color: var(--accent);
+    font-weight: 800;
+    text-align: right;
   }
 
   /* Smaller header buttons on mobile */
@@ -746,22 +863,82 @@ html.mobile-init .file-browser-panel {
     will-change: transform;
   }
 
-  /* iOS Safari with tab bar: position: fixed uses the layout viewport which
-     extends behind the browser chrome. Offset the toolbar upward by the delta
-     between 100vh (layout) and --app-height (visual). */
-  .ios-device.safari-browser .toolbar {
-    bottom: calc(var(--safe-area-bottom) + (100vh - var(--app-height, 100vh)));
+  :is(.ios-device.safari-browser, .codeman-native) .toolbar {
+    bottom: var(--safe-area-bottom);
   }
 
   /* When keyboard is visible the JS translateY already accounts for the full
      distance from the visual-viewport bottom to the layout-viewport bottom
      (keyboard + Safari bar).  Remove the CSS Safari-bar offset to avoid
      double-counting, which otherwise creates a visible gap above the keyboard. */
-  .keyboard-visible.ios-device.safari-browser .toolbar {
+  .keyboard-visible:is(.ios-device.safari-browser, .codeman-native) .toolbar {
     bottom: var(--safe-area-bottom);
   }
-  .keyboard-visible.ios-device.safari-browser .keyboard-accessory-bar {
+  .keyboard-visible:is(.ios-device.safari-browser, .codeman-native) .keyboard-accessory-bar {
     bottom: calc(var(--safe-area-bottom) + 40px);
+  }
+
+  .touch-device.pwa-standalone:not(.codeman-native) .toolbar {
+    bottom: calc(-1 * var(--safe-area-bottom));
+    height: calc(40px + var(--safe-area-bottom));
+    min-height: calc(40px + var(--safe-area-bottom));
+    max-height: calc(40px + var(--safe-area-bottom));
+    padding-bottom: calc(0.3rem + var(--safe-area-bottom));
+  }
+
+  .touch-device.pwa-standalone:not(.codeman-native) .main {
+    padding-bottom: 40px;
+  }
+
+  .touch-device.pwa-standalone:not(.codeman-native) .mobile-overview.visible {
+    padding-bottom: calc(1rem + 40px);
+  }
+
+  .keyboard-visible.touch-device.pwa-standalone:not(.codeman-native) .toolbar {
+    bottom: 0;
+    height: 40px;
+    min-height: 40px;
+    max-height: 40px;
+    padding-bottom: 0.3rem;
+  }
+
+  .touch-device.codeman-native .toolbar {
+    bottom: 0;
+    height: calc(40px + var(--safe-area-bottom));
+    min-height: calc(40px + var(--safe-area-bottom));
+    max-height: calc(40px + var(--safe-area-bottom));
+    padding-bottom: calc(0.3rem + var(--safe-area-bottom));
+  }
+
+  .keyboard-visible.touch-device.codeman-native .toolbar,
+  html.codeman-native .keyboard-visible.touch-device .toolbar {
+    display: none !important;
+    pointer-events: none;
+  }
+
+  .keyboard-visible.touch-device.codeman-native .keyboard-accessory-bar,
+  html.codeman-native .keyboard-visible.touch-device .keyboard-accessory-bar,
+  .keyboard-visible.touch-device.codeman-native .keyboard-accessory-bar.visible,
+  html.codeman-native .keyboard-visible.touch-device .keyboard-accessory-bar.visible {
+    bottom: 0 !important;
+  }
+
+  .keyboard-visible.touch-device.codeman-native .main,
+  html.codeman-native .keyboard-visible.touch-device .main {
+    padding-bottom: 0;
+  }
+
+  .keyboard-visible .toolbar {
+    display: none !important;
+  }
+
+  .keyboard-visible .keyboard-accessory-bar,
+  .keyboard-visible .keyboard-accessory-bar.visible {
+    bottom: 0 !important;
+  }
+
+  .keyboard-visible .main {
+    padding-bottom: 0 !important;
   }
 
   /* Show case selector in center */
@@ -1147,7 +1324,9 @@ html.mobile-init .file-browser-panel {
     justify-content: center;
     flex-shrink: 0;
     gap: 4px;
-    padding: 6px 12px;
+    min-width: 44px;
+    height: 32px;
+    padding: 0 12px;
     background: #2a2a2a;
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 6px;
@@ -1187,21 +1366,24 @@ html.mobile-init .file-browser-panel {
   }
 
   .accessory-btn-arrow {
-    padding: 6px 10px;
-    background: #2563eb;
-    border-color: rgba(59, 130, 246, 0.5);
-    color: #fff;
+    padding: 0;
+    background: #2a2a2a;
+    border-color: rgba(255, 255, 255, 0.15);
+    color: #e5e5e5;
   }
 
   .accessory-btn-arrow:active {
-    background: #1d4ed8;
+    background: #3a3a3a;
   }
 
   .accessory-btn-dismiss {
     margin-left: auto;
-    flex: 1 1 0;
-    max-width: 100px;
-    padding: 10px 8px;
+    flex: 0 0 48px;
+    width: 48px;
+    min-width: 48px;
+    max-width: 48px;
+    height: 32px;
+    padding: 0;
     background: #2563eb;
     border-color: rgba(59, 130, 246, 0.5);
     color: #fff;
@@ -1209,8 +1391,8 @@ html.mobile-init .file-browser-panel {
   }
 
   .accessory-btn-dismiss svg {
-    width: 22px;
-    height: 22px;
+    width: 18px;
+    height: 18px;
   }
 
   .accessory-btn-dismiss:active {
@@ -2373,7 +2555,7 @@ html.mobile-init .file-browser-panel {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-    padding: 0.75rem 0.6rem calc(1rem + var(--safe-area-bottom));
+    padding: 0.75rem 0.6rem calc(1rem + 40px + var(--safe-area-bottom));
     background: var(--bg-dark);
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
@@ -2413,6 +2595,7 @@ html.mobile-init .file-browser-panel {
     position: relative;
     display: flex;
     flex-direction: column;
+    gap: 0.55rem;
   }
 
   .mobile-overview-run-group {
@@ -2471,6 +2654,41 @@ html.mobile-init .file-browser-panel {
     width: 20px !important;
     height: 20px !important;
     margin: 0 !important;
+  }
+
+  .mobile-overview-case {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    width: 100%;
+    min-height: 40px;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 0.82rem;
+    text-align: left;
+  }
+
+  .mobile-overview-case:active {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  .mobile-overview-case svg {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    color: var(--text-muted);
+  }
+
+  .mobile-overview-case-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .mobile-overview-run-menu {
@@ -3585,5 +3803,51 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
 
   :is(#sessionOptionsModal, #createCaseModal) .set-rail-item.active {
     background: rgba(var(--accent-rgb), 0.13);
+  }
+}
+
+/* iPhone landscape can be wider than the main <=768px mobile block while still
+   using the phone keyboard. Keep the keyboard chrome rules active based on
+   coarse pointer + short viewport height so rotation does not fall back to the
+   desktop footer toolbar. */
+@media (pointer: coarse) and (max-height: 520px) and (max-width: 1023px) {
+  .keyboard-accessory-bar {
+    display: none;
+    position: fixed;
+    bottom: calc(var(--safe-area-bottom) + 40px);
+    left: 0;
+    right: 0;
+    height: 44px;
+    background: #1a1a1a;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 6px 8px;
+    padding-left: calc(8px + var(--safe-area-left));
+    padding-right: calc(8px + var(--safe-area-right));
+    gap: 8px;
+    align-items: center;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    z-index: 51;
+    transition: transform 0.15s ease-out;
+    will-change: transform;
+  }
+
+  .keyboard-accessory-bar.visible {
+    display: flex;
+  }
+
+  .keyboard-visible .toolbar {
+    display: none !important;
+    pointer-events: none;
+  }
+
+  .keyboard-visible .keyboard-accessory-bar,
+  .keyboard-visible .keyboard-accessory-bar.visible {
+    bottom: 0 !important;
+  }
+
+  .keyboard-visible .main {
+    padding-bottom: 0 !important;
   }
 }

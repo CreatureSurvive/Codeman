@@ -580,7 +580,7 @@ Object.assign(CodemanApp.prototype, {
     // Mirror loadHistorySessions(): prefer already-loaded this.cases.
     if (!Array.isArray(this.cases) || this.cases.length === 0) {
       try {
-        const r = await fetch('/api/cases');
+        const r = await this._nodeFetch('/api/cases');
         const d = r.ok ? await r.json() : null;
         this.cases = d?.data || [];
       } catch {
@@ -625,7 +625,7 @@ Object.assign(CodemanApp.prototype, {
     if (!list) return;
     try {
       const url = '/api/sessions/unified?limit=200' + (q ? '&q=' + encodeURIComponent(q) : '');
-      const res = await fetch(url);
+      const res = await this._nodeFetch(url);
       const data = await res.json().catch(() => null);
       // ApiResponse envelope: { success: true, data: { sessions, total } }.
       // Surface failures instead of rendering them as an empty result set.

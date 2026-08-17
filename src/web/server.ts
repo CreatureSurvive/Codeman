@@ -170,6 +170,7 @@ import {
   registerWebviewRoutes,
   tryWebviewRefererFallback,
   registerNodeRoutes,
+  registerNativeRoutes,
 } from './routes/index.js';
 import { CronService } from '../cron/cron-service.js';
 
@@ -982,6 +983,7 @@ export class WebServer extends EventEmitter {
     registerAdminRoutes(this.app, ctx);
     registerOrchestratorRoutes(this.app, ctx);
     registerWebviewRoutes(this.app, ctx);
+    registerNativeRoutes(this.app);
     registerNodeRoutes(this.app, {
       headless: this.headless,
       port: this.port,
@@ -2372,7 +2374,9 @@ export class WebServer extends EventEmitter {
     await this.app.listen({ port: this.port, host: this.host });
     const protocol = this.https ? 'https' : 'http';
     const displayHost = this.host === '0.0.0.0' ? 'localhost' : this.host;
-    console.log(`Codeman ${this.headless ? 'headless node' : 'web interface'} running at ${protocol}://${displayHost}:${this.port}`);
+    console.log(
+      `Codeman ${this.headless ? 'headless node' : 'web interface'} running at ${protocol}://${displayHost}:${this.port}`
+    );
 
     // Opt-in: also serve the HOOK endpoints on the docker bridge gateway so
     // in-container hooks (permission/idle/stop callbacks) can reach a loopback-bound

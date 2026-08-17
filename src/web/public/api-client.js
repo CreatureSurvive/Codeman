@@ -21,7 +21,10 @@ Object.assign(CodemanApp.prototype, {
       '/api/status',
       '/api/events',
       '/api/cases',
+      '/api/filesystem',
+      '/api/history',
       '/api/quick-start',
+      '/api/search',
       '/api/sessions',
       '/api/opencode',
       '/api/codex',
@@ -83,13 +86,15 @@ Object.assign(CodemanApp.prototype, {
       this.currentNodeId = 'local';
     this.renderNodeSelector?.();
     this.renderFederationNodes?.();
+    this.refreshCliAvailability?.();
   },
 
   renderNodeSelector() {
     const select = document.getElementById('nodeSelector');
     if (!select) return;
+    const nodeList = this.nodes.length ? this.nodes : [{ id: 'local', name: 'Local' }];
     select.replaceChildren();
-    for (const node of this.nodes.length ? this.nodes : [{ id: 'local', name: 'Local' }]) {
+    for (const node of nodeList) {
       const option = document.createElement('option');
       option.value = node.id;
       option.textContent =
@@ -99,6 +104,79 @@ Object.assign(CodemanApp.prototype, {
     }
     select.value = this.currentNodeId || 'local';
     select.parentElement?.classList.toggle('node-selector--remote', select.value !== 'local');
+    const trigger = document.getElementById('nodeSelectorMobileTrigger');
+    if (trigger) {
+      const current = nodeList.find((node) => node.id === select.value) || nodeList[0];
+      const name =
+        current?.id === 'local' ? current?.name || 'Local' : current?.name || current?.baseUrl || current?.id;
+      trigger.title = `Switch Codeman node: ${name || 'Local'}`;
+      trigger.setAttribute('aria-label', `Switch Codeman node. Current: ${name || 'Local'}`);
+    }
+    this.renderNodeMenu?.();
+  },
+
+  renderNodeMenu() {
+    const menu = document.getElementById('nodeSelectorMenu');
+    if (!menu) return;
+    const nodeList = this.nodes.length ? this.nodes : [{ id: 'local', name: 'Local' }];
+    menu.replaceChildren();
+    for (const node of nodeList) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'node-selector-menu-item';
+      item.dataset.nodeId = node.id;
+      item.disabled = node.enabled === false;
+      const selected = node.id === (this.currentNodeId || 'local');
+      item.setAttribute('aria-pressed', String(selected));
+      if (selected) item.classList.add('selected');
+      const name = node.id === 'local' ? node.name || 'Local' : node.name || node.baseUrl || node.id;
+      item.innerHTML = `
+        <span class="node-selector-menu-dot" aria-hidden="true"></span>
+        <span class="node-selector-menu-label"></span>
+        <span class="node-selector-menu-check" aria-hidden="true">${selected ? '✓' : ''}</span>
+      `;
+      item.querySelector('.node-selector-menu-label').textContent = node.id === 'local' ? `${name} (local)` : name;
+      item.addEventListener('click', () => this.selectNodeFromMenu(node.id));
+      menu.appendChild(item);
+    }
+  },
+
+  toggleNodeMenu(event) {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    const menu = document.getElementById('nodeSelectorMenu');
+    const trigger = document.getElementById('nodeSelectorMobileTrigger');
+    if (!menu || !trigger) return;
+    const willOpen = menu.hidden;
+    if (willOpen) {
+      if (menu.parentElement !== document.body) document.body.appendChild(menu);
+      this.renderNodeMenu?.();
+      menu.hidden = false;
+      trigger.setAttribute('aria-expanded', 'true');
+      this._nodeMenuOutsideHandler = (outsideEvent) => {
+        if (menu.contains(outsideEvent.target) || trigger.contains(outsideEvent.target)) return;
+        this.closeNodeMenu?.();
+      };
+      document.addEventListener('pointerdown', this._nodeMenuOutsideHandler, { capture: true });
+    } else {
+      this.closeNodeMenu?.();
+    }
+  },
+
+  closeNodeMenu() {
+    const menu = document.getElementById('nodeSelectorMenu');
+    const trigger = document.getElementById('nodeSelectorMobileTrigger');
+    if (menu) menu.hidden = true;
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    if (this._nodeMenuOutsideHandler) {
+      document.removeEventListener('pointerdown', this._nodeMenuOutsideHandler, { capture: true });
+      this._nodeMenuOutsideHandler = null;
+    }
+  },
+
+  async selectNodeFromMenu(nodeId) {
+    this.closeNodeMenu?.();
+    await this.setCurrentNode(nodeId);
   },
 
   async setCurrentNode(nodeId) {
@@ -117,10 +195,22 @@ Object.assign(CodemanApp.prototype, {
     this.sessions.clear();
     this.sessionOrder = [];
     this.activeSessionId = null;
+    this.cases = [];
+    this._historyAll = [];
+    this._historyCases = [];
+    this._mobileOverviewHistory = [];
+    this._folderHistoryState = null;
     this.renderSessionTabs?.();
     this.connectSSE?.();
     await this.loadState?.();
     this.loadQuickStartCases?.();
+    this.refreshCliAvailability?.();
+    if (this.isMobileOverviewVisible?.()) {
+      this.renderMobileOverview?.();
+      this.loadMobileOverviewHistory?.();
+    } else if (document.getElementById('welcomeOverlay')?.classList.contains('visible')) {
+      this.loadHistorySessions?.();
+    }
   },
 
   async saveFederationNodeFromSettings() {

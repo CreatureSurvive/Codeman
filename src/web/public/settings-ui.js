@@ -1154,20 +1154,48 @@ Object.assign(CodemanApp.prototype, {
     this._updatePollTimer = setInterval(poll, 1500);
   },
 
+  _currentCliAvailabilityFlags() {
+    if (!this.currentNodeId || this.currentNodeId === 'local') return window.__codemanCliAvailable;
+    return this._cliAvailabilityByNode?.get(this.currentNodeId);
+  },
+
   /**
-   * Is `tool` installed on the server? Reads `window.__codemanCliAvailable`,
-   * injected by renderIndexHtml (see the comment there for why this is injected
-   * rather than fetched per surface).
+   * Is `tool` installed on the selected node?
    *
-   * Unknown reads as AVAILABLE. A missing flag means the page was rendered by a
-   * build that predates the injection, or by a solo popup: hiding every run
-   * button on a doubt would leave nothing to click, and the pre-existing failure
-   * mode for a genuinely missing CLI is just an error toast.
+   * Local availability is injected by renderIndexHtml. Remote-node availability
+   * is probed lazily through the node proxy and cached by node id.
+   *
+   * Unknown reads as AVAILABLE. A missing flag means the page was rendered by an
+   * older build, a remote probe is still in flight, or the surface is a solo
+   * popup. Hiding every run button on a doubt would leave nothing to click, and
+   * the pre-existing failure mode for a genuinely missing CLI is an error toast.
    */
   isCliAvailable(tool) {
-    const flags = window.__codemanCliAvailable;
+    const flags = this._currentCliAvailabilityFlags();
     if (!flags || typeof flags !== 'object') return true;
     return flags[tool] !== false;
+  },
+
+  async refreshCliAvailability() {
+    if (!this.currentNodeId || this.currentNodeId === 'local') {
+      this.applyWelcomeCliVisibility?.();
+      this.updateMobileOverview?.();
+      return;
+    }
+    const nodeId = this.currentNodeId;
+    const tools = ['claude', 'opencode', 'codex', 'gemini', 'antigravity'];
+    const entries = await Promise.all(
+      tools.map(async (tool) => {
+        const status = await this._apiJson?.(`/api/${tool}/status`);
+        return [tool, status?.available !== false];
+      })
+    );
+    if (this.currentNodeId !== nodeId) return;
+    this._cliAvailabilityByNode?.set(nodeId, Object.fromEntries(entries));
+    this.applyWelcomeCliVisibility?.();
+    this.updateMobileOverview?.();
+    const menu = document.getElementById('runModeMenu');
+    if (menu?.classList.contains('active')) this._refreshRunModeAvailability?.(menu);
   },
 
   /**
@@ -1325,6 +1353,49 @@ Object.assign(CodemanApp.prototype, {
       this._tunnelQrEscHandler = null;
     }
     this._clearQrCountdown();
+  },
+
+  showNativeConnectQR() {
+    this.closeTunnelQR();
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'tunnelQrOverlay';
+    overlay.style.display = 'flex';
+    overlay.onclick = (e) => { if (e.target === overlay) this.closeTunnelQR(); };
+    overlay.innerHTML = `
+      <div style="background:var(--bg-panel);border:1px solid var(--border);border-radius:12px;padding:24px;text-align:center;max-width:360px;width:calc(100% - 32px);box-shadow:0 20px 60px rgba(0,0,0,.45)">
+        <h3 style="margin:0 0 8px;color:var(--text-primary)">Native App Quick Connect</h3>
+        <p style="margin:0 0 16px;color:var(--text-muted);font-size:13px">Scan this in the Codeman iOS or Android app.</p>
+        <div id="tunnelQrContainer" style="background:#fff;border-radius:8px;padding:16px;display:inline-block">
+          <div style="color:#666;font-size:13px;padding:30px">Loading...</div>
+        </div>
+        <div id="tunnelQrUrl" style="margin-top:12px;font-family:monospace;font-size:11px;color:var(--text-muted);word-break:break-all;cursor:pointer" title="Click to copy"></div>
+        <button onclick="app.closeTunnelQR()" style="margin-top:16px;padding:6px 20px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);cursor:pointer;font-size:13px">Close</button>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    fetch('/api/native/connect')
+      .then((r) => r.json())
+      .then((env) => {
+        const data = env?.success === true ? env.data : env;
+        const container = document.getElementById('tunnelQrContainer');
+        const urlEl = document.getElementById('tunnelQrUrl');
+        if (container && data.svg) container.innerHTML = data.svg;
+        if (urlEl) {
+          const link = data.connectUrl || data.baseUrl || '';
+          urlEl.textContent = link;
+          urlEl.onclick = () => {
+            navigator.clipboard?.writeText(link);
+            this.showToast?.('Quick-connect link copied', 'success');
+          };
+        }
+      })
+      .catch(() => {
+        const container = document.getElementById('tunnelQrContainer');
+        if (container) container.innerHTML = '<div style="color:#999;font-size:11px;padding:20px">QR unavailable</div>';
+      });
+    this._tunnelQrEscHandler = (e) => { if (e.key === 'Escape') this.closeTunnelQR(); };
+    document.addEventListener('keydown', this._tunnelQrEscHandler);
   },
 
   /** Fallback: fetch QR SVG from API when SSE payload lacks it */

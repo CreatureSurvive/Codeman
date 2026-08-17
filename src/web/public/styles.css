@@ -49,6 +49,7 @@
   --ring-glow: 0 0 12px -2px rgba(56, 182, 240, 0.55);
   --header-height: 36px;
   --toolbar-height: 42px;
+  --app-top: 0px;
   --glass-bg: rgba(31, 38, 48, 0.85);
   --glass-border: rgba(255, 255, 255, 0.08);
   --control-bg: rgba(255, 255, 255, 0.045);
@@ -453,6 +454,15 @@ body {
   overflow: hidden;
 }
 
+body.touch-device {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  min-height: var(--app-height, 100dvh);
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 /* App Layout - Terminal First */
 .app {
   display: flex;
@@ -460,6 +470,17 @@ body {
   height: 100vh;
   height: 100dvh;
   height: var(--app-height, 100dvh);
+}
+
+body.touch-device .app {
+  position: fixed;
+  top: var(--app-top, 0px);
+  left: 0;
+  right: 0;
+  width: 100%;
+  height: var(--app-height, 100dvh);
+  padding-bottom: 0;
+  overflow: hidden;
 }
 
 /* Compact Header */
@@ -1928,6 +1949,11 @@ html[data-line-anim="packet"] .connection-line.line-enter {
   color: var(--text);
   font: inherit;
   font-size: 0.72rem;
+}
+
+.node-selector-mobile-trigger,
+.node-selector-menu {
+  display: none;
 }
 
 .node-selector--remote {
@@ -4534,6 +4560,10 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
      rounder 240 because it is the width at which the common `~/<dir>/<repo>` +
      timestamp recent-session row still fits whole, which is what that list is for. */
   max-width: 250px;
+  max-height: calc(var(--app-height, 100dvh) - var(--header-height) - var(--toolbar-height) - var(--safe-area-top) - var(--safe-area-bottom) - 42px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
@@ -4554,14 +4584,17 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
     width: min(760px, calc(100vw - 24px));
   }
   .run-mode-history {
-    /* More rows are worth showing once each one is legible. */
-    max-height: 320px;
+    /* The whole menu scrolls; nested scroll regions make custom actions unreachable. */
+    max-height: none;
   }
 }
 .run-mode-menu.active {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+.run-mode-menu > * {
+  flex-shrink: 0;
 }
 .run-mode-option {
   display: flex;
@@ -4764,6 +4797,22 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   cursor: pointer;
   background: linear-gradient(180deg, var(--accent-grad-a), var(--accent-grad-b));
   color: var(--accent-ink);
+}
+
+#customRunActionModal .set-head-keyboard-dismiss {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 620;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  cursor: pointer;
+  background: var(--bg-input);
+  color: var(--text);
 }
 
 #customRunActionModal .set-head-actions .modal-close {
@@ -5043,6 +5092,38 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   .keyboard-visible #customRunActionModal .set-doc.custom-action-doc {
     padding-bottom: calc(180px + var(--safe-area-bottom));
   }
+
+  #customRunActionModal .set-head-actions {
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-input);
+  }
+
+  #customRunActionModal .set-head-save,
+  #customRunActionModal .set-head-keyboard-dismiss {
+    height: 36px;
+    padding: 0 13px;
+    font-size: 0.84rem;
+  }
+
+  #customRunActionModal .set-head-save {
+    display: inline-flex;
+  }
+
+  .keyboard-visible #customRunActionModal .set-head-keyboard-dismiss {
+    display: inline-flex;
+  }
+
+  #customRunActionModal .set-head-actions .modal-close {
+    width: 36px;
+    height: 36px;
+    font-size: 1.35rem;
+  }
+
+  #customRunActionModal .form-actions.set-foot {
+    display: none;
+  }
 }
 
 .custom-action-env-list {
@@ -5095,13 +5176,11 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   font-weight: 600;
 }
 .run-mode-history {
-  max-height: 200px;
-  overflow-y: auto;
+  max-height: none;
+  overflow: visible;
 }
-/* `overflow-y: auto` computes overflow-x to auto as well, which makes this a scroll
-   container and lets a row size itself to its own content. A long path therefore
-   scrolled sideways instead of ellipsizing, and before the menu was narrowed it
-   simply pinned the menu at its max-width. */
+/* Keep recent rows at the menu width so long paths ellipsize instead of forcing
+   horizontal overflow. The full menu is the only vertical scroller. */
 .run-mode-history .run-mode-option {
   max-width: 100%;
   /* `.run-mode-history` is a block scroller, not a flex container, so these
@@ -5687,6 +5766,31 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition-smooth);
+}
+
+.btn-case-browse {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-left: none;
+  border-radius: 0;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all var(--transition-smooth);
+}
+
+.btn-case-browse:hover {
+  background: rgba(59, 130, 246, 0.16);
+  border-color: rgba(96, 165, 250, 0.28);
+  color: var(--text);
+}
+
+.btn-case-browse svg {
+  width: 14px;
+  height: 14px;
 }
 
 .btn-case-add:hover {
@@ -6685,6 +6789,8 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 }
 
 .mobile-case-picker-footer {
+  display: grid;
+  gap: 8px;
   padding: 12px 20px 16px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
@@ -13227,6 +13333,35 @@ body.touch-device.cjk-input-visible .main {
   border-radius: 8px;
 }
 
+.path-picker-root-chips {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.path-picker-root-chip {
+  flex: 0 0 auto;
+  max-width: 180px;
+  padding: 7px 10px;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.path-picker-root-chip.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .path-picker-nav {
   padding: 10px 12px;
 }
@@ -14402,6 +14537,7 @@ html:not([data-skin="og"]) {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.25);
 }
+.btn-case-browse { color: var(--text-dim); }
 .btn-case-add { color: var(--accent-soft); }
 
 /* ---- Header system stats: cohesive accent meters ---- */

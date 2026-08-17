@@ -192,6 +192,90 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  normalizeCasePath(path) {
+    return String(path || '').replace(/\/+$/, '') || '/';
+  },
+
+  caseNameFromPath(path) {
+    const folderName = String(path || '').split('/').filter(Boolean).pop() || 'folder';
+    return folderName
+      .normalize('NFKD')
+      .replace(/[^\w-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .replace(/-{2,}/g, '-')
+      .slice(0, 48) || 'folder';
+  },
+
+  uniqueCaseName(baseName) {
+    const existingNames = new Set((this.cases || []).map(c => c.name));
+    if (!existingNames.has(baseName)) return baseName;
+    for (let i = 2; i < 1000; i += 1) {
+      const candidate = `${baseName}-${i}`;
+      if (!existingNames.has(candidate)) return candidate;
+    }
+    return `${baseName}-${Date.now()}`;
+  },
+
+  findCaseByPath(path) {
+    const target = this.normalizeCasePath(path);
+    return (this.cases || []).find(c => this.normalizeCasePath(c.path) === target);
+  },
+
+  currentQuickStartCasePath() {
+    const selectedName = document.getElementById('quickStartCase')?.value;
+    return (this.cases || []).find(c => c.name === selectedName)?.path || '';
+  },
+
+  openQuickStartDirectoryPicker() {
+    if (typeof PathPicker === 'undefined' || !PathPicker?.open) {
+      this.showToast('Folder browser is not available', 'error');
+      return;
+    }
+
+    this.closeCasePicker();
+    this.closeMobileCasePicker?.();
+    PathPicker.open({
+      title: 'Select Session Directory',
+      initialPath: this.currentQuickStartCasePath(),
+      directoriesOnly: true,
+      onSelect: path => {
+        this.selectDirectoryAsCase(path);
+      },
+    });
+  },
+
+  async selectDirectoryAsCase(path) {
+    const selectedPath = String(path || '').trim();
+    if (!selectedPath) return;
+
+    const existingCase = this.findCaseByPath(selectedPath);
+    if (existingCase) {
+      this.selectQuickStartCase(existingCase.name);
+      this.showToast(`Selected: ${existingCase.name}`, 'success');
+      return;
+    }
+
+    const name = this.uniqueCaseName(this.caseNameFromPath(selectedPath));
+    try {
+      const res = await fetch('/api/cases/link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, path: selectedPath }),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok || result.success === false) {
+        throw new Error(result.error || `HTTP ${res.status}`);
+      }
+
+      await this.loadQuickStartCases(name);
+      this.selectQuickStartCase(name);
+      this.showToast(`Selected folder: ${name}`, 'success');
+    } catch (err) {
+      console.error('Failed to select session directory:', err);
+      this.showToast(`Could not select folder: ${err.message}`, 'error');
+    }
+  },
+
   setupQuickStartCasePicker() {
     const select = document.getElementById('quickStartCase');
     const input = document.getElementById('quickStartCaseSearch');
@@ -662,7 +746,9 @@ Object.assign(CodemanApp.prototype, {
     this.renderCustomRunActionEnvEditor();
     document.getElementById('runModeMenu')?.classList.remove('active');
     modal.classList.add('active');
-    setTimeout(() => label?.focus(), 0);
+    if (!MobileDetection.isTouchDevice?.()) {
+      setTimeout(() => label?.focus(), 0);
+    }
   },
 
   closeCustomRunActionEditor() {
@@ -670,6 +756,18 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('customRunActionEnvMenu')?.classList.remove('active');
     this._customRunActionEditingId = null;
     this._customRunActionEditorEnv = [];
+  },
+
+  dismissSoftKeyboard() {
+    const active = document.activeElement;
+    if (active && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName || '')) active.blur();
+    if (active?.isContentEditable) active.blur();
+    setTimeout(() => {
+      if (typeof KeyboardHandler !== 'undefined') {
+        KeyboardHandler.handleNativeKeyboardHide?.();
+        KeyboardHandler.updateLayoutForKeyboard?.();
+      }
+    }, 80);
   },
 
   renderCustomRunActionEnvEditor() {

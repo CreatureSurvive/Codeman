@@ -331,6 +331,9 @@ Object.assign(CodemanApp.prototype, {
       } else if (action === 'run') {
         this._closeMobileOverviewRunMenu();
         void this.run();
+      } else if (action === 'select-case') {
+        this._closeMobileOverviewRunMenu();
+        this.showMobileCasePicker?.();
       } else if (action === 'run-menu') {
         this._toggleMobileOverviewRunMenu();
       } else if (action === 'run-mode') {
@@ -521,9 +524,43 @@ Object.assign(CodemanApp.prototype, {
 
     top.appendChild(group);
     wrap.appendChild(top);
+    wrap.appendChild(this._buildMobileOverviewCaseButton());
 
     if (this._mobileOverviewRunMenuOpen) wrap.appendChild(this._buildMobileOverviewRunMenu());
     return wrap;
+  },
+
+  _buildMobileOverviewCaseButton() {
+    const selectedName = document.getElementById('quickStartCase')?.value || 'testcase';
+    const option = this.getCasePickerOptions?.().find((item) => item.name === selectedName);
+    const label = option?.label || selectedName;
+
+    const button = document.createElement('button');
+    button.className = 'mobile-overview-case';
+    button.type = 'button';
+    button.dataset.moAction = 'select-case';
+    button.title = 'Select start directory';
+
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('viewBox', '0 0 24 24');
+    icon.setAttribute('fill', 'none');
+    icon.setAttribute('stroke', 'currentColor');
+    icon.setAttribute('stroke-width', '2');
+    icon.setAttribute('stroke-linecap', 'round');
+    icon.setAttribute('stroke-linejoin', 'round');
+    icon.setAttribute('aria-hidden', 'true');
+    const folder = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    folder.setAttribute('d', 'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z');
+    icon.appendChild(folder);
+    button.appendChild(icon);
+
+    const text = document.createElement('span');
+    text.className = 'mobile-overview-case-label';
+    text.setAttribute('data-i18n-skip', '');
+    text.textContent = label;
+    button.appendChild(text);
+
+    return button;
   },
 
   /** Down chevron as SVG (see the note at its call site). */

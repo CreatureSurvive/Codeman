@@ -315,6 +315,10 @@ function findMatchingPickerRoot(roots: FilesystemBrowseRoot[], candidate: string
     .sort((a, b) => b.path.length - a.path.length)[0];
 }
 
+function findContainingPickerRoot(roots: FilesystemBrowseRoot[], candidate: string): FilesystemBrowseRoot | undefined {
+  return roots.find((root) => isPathWithinRoot(root.path, candidate));
+}
+
 /**
  * Whether a path has a dot-prefixed segment anywhere below its browse root.
  *
@@ -777,13 +781,11 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
     const parentCandidate = resolve(candidatePath, '..');
     let parent: string | null = null;
-    if (candidatePath !== matchingRoot.path) {
-      try {
-        const resolvedParent = realpathSync(parentCandidate);
-        if (isPathWithinRoot(matchingRoot.path, resolvedParent)) parent = parentCandidate;
-      } catch {
-        // A concurrently removed parent simply disables upward navigation.
-      }
+    try {
+      const resolvedParent = realpathSync(parentCandidate);
+      if (resolvedParent !== resolvedPath && findContainingPickerRoot(roots, resolvedParent)) parent = parentCandidate;
+    } catch {
+      // A concurrently removed parent simply disables upward navigation.
     }
 
     return {

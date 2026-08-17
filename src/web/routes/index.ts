@@ -27,3 +27,4 @@ export { registerWsRoutes } from './ws-routes.js';
 export { registerVoiceRoutes } from './voice-routes.js';
 export { registerWebviewRoutes, tryWebviewRefererFallback } from './webview-routes.js';
 export { registerNodeRoutes } from './node-routes.js';
+export { registerNativeRoutes } from './native-routes.js';

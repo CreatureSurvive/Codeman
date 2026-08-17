@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0b0f17" />
+    <title>Codeman</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div class="mark">C</div>
+        <div>
+          <h1>Codeman</h1>
+          <p>Connect this app to a Codeman server.</p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Servers</h2>
+          <button id="scanQrBtn" type="button">Scan QR</button>
+        </div>
+        <div id="serverList" class="server-list"></div>
+      </section>
+
+      <form id="serverForm" class="panel form-panel">
+        <h2>Add server</h2>
+        <label>
+          <span>Name</span>
+          <input id="serverName" name="name" autocomplete="organization" placeholder="Home server" />
+        </label>
+        <label>
+          <span>URL</span>
+          <input id="serverUrl" name="url" inputmode="url" autocomplete="url" placeholder="http://192.168.40.151:3010" />
+        </label>
+        <div class="actions">
+          <button id="testBtn" type="button" class="secondary">Test</button>
+          <button type="submit">Save</button>
+        </div>
+      </form>
+
+      <section class="notes">
+        <p>Use HTTPS for internet-facing servers. HTTP is supported for trusted LAN or VPN hosts.</p>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

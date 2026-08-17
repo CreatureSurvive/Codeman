@@ -43,6 +43,7 @@
   <!-- DOMPurify (allowlist HTML sanitizer for rendered markdown).
        Must load before sanitize-html.js (which wires it) and app.js (which calls it). -->
   <script defer src="vendor/dompurify.min.js"></script>
+  <script defer src="native-bridge.js"></script>
   <!-- Synchronous mobile detection — runs before first paint to prevent panel flash -->
   <script>if(window.innerWidth<768||(('ontouchstart' in window||navigator.maxTouchPoints>0)&&window.innerWidth<1024))document.documentElement.classList.add('mobile-init');</script>
   <!-- Synchronous skin selection — runs before first paint to prevent theme flash -->
@@ -143,12 +144,16 @@
         <button class="btn-icon-header btn-file-viewer" onclick="app.toggleFileBrowserButton()" title="File Viewer" aria-label="Open file viewer" aria-expanded="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
         <button class="btn-icon-header btn-multimonitor btn-multimonitor--hidden" onclick="app.launchMultiMonitor()" title="Open Codeman across all displays" aria-label="Open Codeman across all displays"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="13" height="9" rx="1.5"/><rect x="11" y="9" width="11" height="8" rx="1.5"/></svg></button>
         <button class="btn-icon-header btn-ultracode-agents btn-ultracode-agents--hidden" onclick="app.toggleUltracodeAgentsPanel()" title="Ultracode / Workflow agents" aria-label="Open ultracode workflow agents"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M8.2 7.2 15.6 11M8.2 16.8 15.6 13"/></svg></button>
-        <label class="node-selector" title="Active Codeman node">
+        <div class="node-selector" title="Active Codeman node">
           <span>Node</span>
           <select id="nodeSelector" onchange="app.setCurrentNode(this.value)" aria-label="Active Codeman node">
             <option value="local">Local</option>
           </select>
-        </label>
+          <button class="node-selector-mobile-trigger" id="nodeSelectorMobileTrigger" type="button" onclick="app.toggleNodeMenu(event)" title="Switch Codeman node" aria-label="Switch Codeman node" aria-expanded="false" aria-controls="nodeSelectorMenu">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="M10.4 7.5 6.6 16.5"/><path d="M13.6 7.5 17.4 16.5"/><path d="M8 19h8"/></svg>
+          </button>
+          <div class="node-selector-menu" id="nodeSelectorMenu" hidden></div>
+        </div>
         <div class="header-plan-usage header-plan-usage--hidden" id="planUsageChip" title="Claude plan usage limits">—</div>
         <button class="btn-icon-header btn-notifications" onclick="app.toggleNotifications()" title="Notifications" aria-label="Toggle notifications" style="display:none;">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
@@ -596,6 +601,9 @@
             <select id="quickStartCase" class="toolbar-select case-native-select" title="Select case" aria-hidden="true" tabindex="-1">
               <option value="testcase">testcase</option>
             </select>
+            <button class="btn-case-browse" onclick="app.openQuickStartDirectoryPicker()" title="Select start directory">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><path d="m9 14 2 2 4-4"/></svg>
+            </button>
             <button class="btn-case-add" onclick="app.showCreateCaseModal()" title="Create new case">+</button>
             <button class="btn-case-settings" onclick="app.toggleCaseSettings()" title="Case settings">&#x2699;</button>
             <div class="case-settings-popover hidden" id="caseSettingsPopover">
@@ -2291,6 +2299,13 @@
                 <div class="set-group-head"><h4>Nodes</h4><span class="set-scope">local</span></div>
                 <p class="set-group-hint">Remote Codeman nodes are used by this dashboard only. A headless node can be installed with CODEMAN_HEADLESS=1.</p>
                 <div class="set-group-body">
+                  <div class="set-row" data-search="capacitor native app mobile ios android quick connect qr">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Native app quick connect</span>
+                      <span class="set-row-desc">Scan this from the iOS or Android app to add this Codeman server.</span>
+                    </div>
+                    <button type="button" class="btn-toolbar btn-sm" onclick="app.showNativeConnectQR()">Show QR</button>
+                  </div>
                   <div class="set-row set-row-block" data-search="nodes federation remote headless dashboard machines raspberry pi macbook">
                     <div class="set-row-text">
                       <span class="set-row-label">Remote nodes</span>
@@ -2381,6 +2396,7 @@
           <h3 id="customRunActionTitle">Custom Action</h3>
           <div class="set-head-actions">
             <button class="modal-close" onclick="app.closeCustomRunActionEditor()" aria-label="Close custom action editor">&times;</button>
+            <button type="button" class="set-head-keyboard-dismiss" onclick="app.dismissSoftKeyboard()">Done</button>
             <button class="set-head-save" onclick="app.saveCustomRunActionFromEditor()">Save</button>
           </div>
         </div>
@@ -2803,6 +2819,10 @@
           </div>
         </div>
         <div class="mobile-case-picker-footer">
+          <button class="btn-toolbar btn-case-create-mobile btn-case-browse-mobile" onclick="app.openQuickStartDirectoryPicker()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><path d="m9 14 2 2 4-4"/></svg>
+            Select Folder
+          </button>
           <button class="btn-toolbar btn-case-create-mobile" onclick="app.showCreateCaseFromMobile()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             Create New Case

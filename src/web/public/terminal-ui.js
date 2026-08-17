@@ -269,6 +269,7 @@ Object.assign(CodemanApp.prototype, {
 
     const container = document.getElementById('terminalContainer');
     this.terminal.open(container);
+    this._installTerminalResumeRepair();
     this._installMobileTapMouseGuard();
 
     // Suppress xterm key handling during CJK IME composition.
@@ -1547,7 +1548,7 @@ Object.assign(CodemanApp.prototype, {
    * @returns {Promise<Array>} deduplicated session list, most recent first
    */
   async _fetchHistorySessions() {
-    const res = await fetch('/api/history/sessions');
+    const res = await this._nodeFetch('/api/history/sessions');
     const data = await res.json();
     const sessions = data.data?.sessions || [];
     if (sessions.length === 0) return [];
@@ -1574,7 +1575,7 @@ Object.assign(CodemanApp.prototype, {
    * @returns {Promise<Array>} unified session items, most recent first
    */
   async _fetchUnifiedSessions(limit = 60) {
-    const res = await fetch('/api/sessions/unified?limit=' + limit);
+    const res = await this._nodeFetch('/api/sessions/unified?limit=' + limit);
     // ApiResponse envelope: { success, data: { sessions } }. Throw on failure so
     // callers (loadHistorySessions) hit their catch instead of rendering a 5xx as
     // an empty history.
@@ -2358,7 +2359,7 @@ Object.assign(CodemanApp.prototype, {
 
     try {
       const url = `/api/history/sessions?projectKey=${encodeURIComponent(projectKey)}&offset=${offset}&limit=${limit}`;
-      const res = await fetch(url);
+      const res = await this._nodeFetch(url);
       const data = await res.json();
       const sessions = data.data?.sessions || [];
       state.total = typeof data.data?.total === 'number' ? data.data.total : sessions.length + offset;
@@ -2769,6 +2770,52 @@ Object.assign(CodemanApp.prototype, {
     });
   },
 
+  _isOrderedTerminalWriteMode() {
+    return MobileDetection.isTouchDevice?.() || document.documentElement.classList.contains('codeman-native');
+  },
+
+  _writeTerminalOrdered(data, callback) {
+    if (!this.terminal) {
+      if (callback) callback();
+      return Promise.resolve();
+    }
+    if (!this._isOrderedTerminalWriteMode()) {
+      this.terminal.write(data, callback);
+      return Promise.resolve();
+    }
+    const previous = this._terminalWriteTail || Promise.resolve();
+    const next = previous
+      .catch(() => {})
+      .then(
+        () =>
+          new Promise((resolve) => {
+            try {
+              this.terminal.write(data, () => {
+                try {
+                  callback?.();
+                } finally {
+                  resolve();
+                }
+              });
+            } catch {
+              try {
+                callback?.();
+              } finally {
+                resolve();
+              }
+            }
+          })
+      );
+    this._terminalWriteTail = next;
+    return next;
+  },
+
+  async _drainTerminalWrites() {
+    try {
+      await (this._terminalWriteTail || Promise.resolve());
+    } catch {}
+  },
+
   /**
    * Flush the flicker filter buffer to the terminal.
    * Called after the buffer window expires.
@@ -2975,10 +3022,10 @@ Object.assign(CodemanApp.prototype, {
       this._hasRecentUserScrollUp() && this.terminal.buffer?.active ? this.terminal.buffer.active.viewportY : null;
 
     if (_joinedLen <= MAX_FRAME_BYTES) {
-      this.terminal.write(joined);
+      this._writeTerminalOrdered(joined);
     } else {
       // Write first chunk now, defer rest to next frame
-      this.terminal.write(joined.slice(0, MAX_FRAME_BYTES));
+      this._writeTerminalOrdered(joined.slice(0, MAX_FRAME_BYTES));
       this.pendingWrites.push(joined.slice(MAX_FRAME_BYTES));
       deferred = true;
       this._scheduleTerminalWriteFlush();
@@ -3023,7 +3070,7 @@ Object.assign(CodemanApp.prototype, {
     ) {
       const overlay = this._localEchoOverlay;
       const self = this;
-      this.terminal.write('', () => {
+        this._writeTerminalOrdered('', () => {
         if (!self._tabCompletionSessionId) return; // already resolved
         overlay.resetBufferDetection();
         const detected = overlay.detectBufferText();
@@ -3186,7 +3233,7 @@ Object.assign(CodemanApp.prototype, {
 
       // For small buffers, write directly — single-frame render is fast enough
       if (cleanBuffer.length <= chunkSize) {
-        this.terminal.write(cleanBuffer, finish);
+        this._writeTerminalOrdered(cleanBuffer, finish);
         return;
       }
 
@@ -3215,7 +3262,16 @@ Object.assign(CodemanApp.prototype, {
 
         const _ct0 = performance.now();
         const chunk = cleanBuffer.slice(offset, offset + chunkSize);
-        this.terminal.write(chunk);
+        const ordered = this._isOrderedTerminalWriteMode();
+        if (ordered) {
+          this._writeTerminalOrdered(chunk).then(() => {
+            // Schedule next chunk after xterm has parsed this one, so a later
+            // buffer replay cannot reset under a still-pending TUI repaint.
+            this._safeYield(writeChunk);
+          });
+        } else {
+          this.terminal.write(chunk);
+        }
         const _cdt = performance.now() - _ct0;
         _chunkCount++;
         if (_cdt > 50)
@@ -3223,6 +3279,8 @@ Object.assign(CodemanApp.prototype, {
             `[CRASH-DIAG] chunk #${_chunkCount} write took ${_cdt.toFixed(0)}ms (${chunk.length} bytes at offset ${offset})`
           );
         offset += chunkSize;
+
+        if (ordered) return;
 
         // Schedule next chunk; rAF if possible, else setTimeout/Worker
         // fallback so progress doesn't stall on occluded/unfocused windows.
@@ -3261,6 +3319,9 @@ Object.assign(CodemanApp.prototype, {
   _beginBufferLoad(owner) {
     if (this._bufferLoadSeq === undefined) this._bufferLoadSeq = 0;
     const loadOwner = owner === undefined ? `buffer-${++this._bufferLoadSeq}` : owner;
+    if (this._isLoadingBuffer && this._bufferLoadOwner === loadOwner) {
+      return loadOwner;
+    }
     this._bufferLoadOwner = loadOwner;
     this._isLoadingBuffer = true;
     this._loadBufferQueue = [];
@@ -4332,6 +4393,71 @@ Object.assign(CodemanApp.prototype, {
         }
       }
     }
+  },
+
+  _installTerminalResumeRepair() {
+    if (this._terminalResumeRepairInstalled) return;
+    this._terminalResumeRepairInstalled = true;
+    this._terminalPageWasHidden = false;
+
+    const markHidden = () => {
+      this._terminalPageWasHidden = true;
+    };
+    const scheduleVisibleRepair = (reason) => {
+      if (!this._terminalPageWasHidden && reason !== 'native-resume' && reason !== 'pageshow-bfcache') return;
+      this._terminalPageWasHidden = false;
+      this._scheduleTerminalResumeRepair(reason);
+    };
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') markHidden();
+      else if (document.visibilityState === 'visible') scheduleVisibleRepair('visibility');
+    });
+    window.addEventListener('pagehide', markHidden);
+    window.addEventListener('pageshow', (event) => scheduleVisibleRepair(event.persisted ? 'pageshow-bfcache' : 'pageshow'));
+    window.addEventListener('focus', () => scheduleVisibleRepair('focus'));
+
+    try {
+      const nativeApp = window.Capacitor?.Plugins?.App;
+      if (nativeApp?.addListener) {
+        const result = nativeApp.addListener('resume', () => this._scheduleTerminalResumeRepair('native-resume'));
+        if (result && typeof result.then === 'function') {
+          result.then((listener) => {
+            this._terminalNativeResumeListener = listener;
+          }).catch(() => {});
+        } else {
+          this._terminalNativeResumeListener = result;
+        }
+      }
+    } catch {}
+  },
+
+  _scheduleTerminalResumeRepair(reason) {
+    if (!this.terminal) return;
+    const now = Date.now();
+    if (now - (this._lastTerminalResumeRepairAt || 0) < 1200) return;
+    this._lastTerminalResumeRepairAt = now;
+    clearTimeout(this._terminalResumeRepairTimer);
+
+    const run = async () => {
+      if (!this.terminal) return;
+      try {
+        this.fitAddon?.fit();
+        this.terminal.refresh(0, this.terminal.rows - 1);
+      } catch {}
+      this._localEchoOverlay?.rerender?.();
+      this._predictiveEcho?.rerender?.();
+      if (!MobileDetection.isTouchDevice() || !this.activeSessionId) return;
+      try {
+        await this._onSessionNeedsRefresh({ id: this.activeSessionId, reason: `resume:${reason}`, full: true });
+      } catch {}
+    };
+
+    // iOS resumes the WebView before visualViewport/xterm canvas state is fully
+    // stable. Do a quick paint repair, then a buffer replay after the compositor
+    // has settled.
+    setTimeout(run, 120);
+    this._terminalResumeRepairTimer = setTimeout(run, 650);
   },
 });
 

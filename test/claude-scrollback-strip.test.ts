@@ -92,6 +92,30 @@ describe('Shell terminal output on a DIRECT PTY is NOT stripped (vim/less/htop n
   });
 });
 
+describe('Shell-backed Claude custom actions use Claude terminal cleanup', () => {
+  it('strips Claude Code full-screen controls when shell launchCommand runs claude', () => {
+    const session = new Session({ workingDir: '/tmp', mode: 'shell', launchCommand: 'claude' });
+
+    handleOutput(session, '\x1b[?1049h\x1b[55;1Hdialog\x1b[3J\x1b[?1006h\x1b[?1049l');
+
+    expect(session.usesClaudeLikeTerminal).toBe(true);
+    expect(session.terminalBuffer).toBe('\x1b[55;1Hdialog');
+  });
+
+  it('treats Anthropic-compatible env overrides as Claude-like even in shell mode', () => {
+    const session = new Session({
+      workingDir: '/tmp',
+      mode: 'shell',
+      envOverrides: { ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic' },
+    });
+
+    handleOutput(session, '\x1b[?1049h\x1b[2Jglm claude\x1b[3J\x1b[?1006h');
+
+    expect(session.usesClaudeLikeTerminal).toBe(true);
+    expect(session.terminalBuffer).toBe('\x1b[2Jglm claude');
+  });
+});
+
 describe('isMuxAltScreenOnlyStripMode', () => {
   it('covers exactly the modes the full strip does not, and only under tmux', () => {
     for (const mode of ['shell', 'opencode', 'antigravity'] as const) {

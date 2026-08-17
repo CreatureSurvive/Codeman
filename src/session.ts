@@ -766,6 +766,14 @@ export class Session extends EventEmitter {
     return this._terminalBuffer.length;
   }
 
+  get usesClaudeLikeTerminal(): boolean {
+    if (this.mode === 'claude') return true;
+    if (this.mode !== 'shell') return false;
+    const command = this._launchCommand ?? '';
+    const backend = this.getBackendInfo();
+    return /(^|[\s"'`/])claude([\s"'`.]|$)/i.test(command) || backend?.type === 'anthropic';
+  }
+
   get textOutput(): string {
     return this._textOutput.value;
   }
@@ -1589,7 +1597,7 @@ export class Session extends EventEmitter {
     // scrollback there is tmux's own client-side smcup at attach, not anything the
     // program in the pane emitted (issue #205, see isMuxAltScreenOnlyStripMode).
     // 3J and the mouse DECSETs stay, so `clear` and mouse-aware TUIs keep working.
-    const fullStrip = isAltScreenStripMode(this.mode);
+    const fullStrip = isAltScreenStripMode(this.mode) || this.usesClaudeLikeTerminal;
     const altOnlyStrip = !fullStrip && isMuxAltScreenOnlyStripMode(this.mode, this._useMux);
     if (fullStrip || altOnlyStrip) {
       // Reassemble sequences split across PTY chunk boundaries first: a chunk

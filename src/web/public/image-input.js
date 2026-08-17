@@ -45,6 +45,38 @@ Object.assign(CodemanApp.prototype, {
       }
       this._uploadAndInsertImages(imageFiles);
     });
+
+    document.addEventListener('paste', (e) => {
+      if (!this.activeSessionId) return;
+      const target = e.target;
+      if (target?.closest?.('input, textarea, [contenteditable="true"], .paste-overlay, .modal.active')) return;
+      if (!this.isTerminalFocusedForImagePaste?.()) return;
+      const imageFiles = this._imageFilesFromClipboardItems(e.clipboardData?.items);
+      if (imageFiles.length === 0) return;
+      e.preventDefault();
+      this._uploadAndInsertImages(imageFiles);
+    }, { capture: true });
+  },
+
+  isTerminalFocusedForImagePaste() {
+    const active = document.activeElement;
+    const terminalContainer = document.getElementById('terminalContainer');
+    return !!(
+      terminalContainer &&
+      (terminalContainer.contains(active) || active?.classList?.contains('xterm-helper-textarea'))
+    );
+  },
+
+  _imageFilesFromClipboardItems(items) {
+    const imageFiles = [];
+    if (!items) return imageFiles;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith('image/')) {
+        const blob = items[i].getAsFile();
+        if (blob) imageFiles.push(blob);
+      }
+    }
+    return imageFiles;
   },
 
   // Called from customKeyEventHandler in terminal-ui.js on Ctrl+V keydown.
@@ -65,16 +97,7 @@ Object.assign(CodemanApp.prototype, {
       e.stopPropagation();
 
       // Check for images in clipboard items
-      var imageFiles = [];
-      var items = e.clipboardData && e.clipboardData.items;
-      if (items) {
-        for (var i = 0; i < items.length; i++) {
-          if (items[i].type.startsWith('image/')) {
-            var blob = items[i].getAsFile();
-            if (blob) imageFiles.push(blob);
-          }
-        }
-      }
+      var imageFiles = self._imageFilesFromClipboardItems(e.clipboardData && e.clipboardData.items);
 
       // Clean up the trap
       setTimeout(function() {
