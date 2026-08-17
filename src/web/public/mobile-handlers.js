@@ -197,6 +197,11 @@ const MobileDetection = {
       resizeTimeout = setTimeout(() => {
         this.updateBodyClass();
         this.updateAppHeight();
+        // Whether the session sidebar is a docked column or a modal overlay is
+        // decided at 1024px, so crossing that width has to re-sync the drawer
+        // state — otherwise the `inert`/aria-hidden set on a closed overlay
+        // drawer survives into the docked rail and makes it unclickable.
+        if (typeof app !== 'undefined') app.applySessionListLayout?.();
         // Tab auto-wrap is width-driven, so it must re-evaluate on resize — the only
         // other trigger is a tab content render. No-op on mobile/tablet (method bails).
         if (typeof app !== 'undefined') app.updateTabOverflowMode?.();
@@ -248,11 +253,16 @@ const KeyboardHandler = {
   keyboardVisible: false,
   initialViewportHeight: 0,
   _viewportSettleTimer: null,
-  _settleScrollToBottom: false,
+  _settleRestoreScroll: false,
   _settlePending: false,
   _nativeKeyboardHeight: 0,
   _nativeKeyboardListeners: [],
   _nativeKeyboardListenerPromises: [],
+  // Scroll intent captured at the start of a settle cycle (#259). `true` =
+  // following live output, `false` = reading history and _settleAnchorY holds
+  // the top visible line to return to.
+  _settleFollowing: true,
+  _settleAnchorY: null,
 
   /** Initialize keyboard handling */
   init() {
@@ -392,8 +402,10 @@ const KeyboardHandler = {
       clearTimeout(this._viewportSettleTimer);
       this._viewportSettleTimer = null;
     }
-    this._settleScrollToBottom = false;
+    this._settleRestoreScroll = false;
     this._settlePending = false;
+    this._settleFollowing = true;
+    this._settleAnchorY = null;
   },
 
   handleNativeKeyboardShow(info = {}) {
@@ -490,7 +502,7 @@ const KeyboardHandler = {
       document.documentElement.style.setProperty('--app-top', `${viewport?.offsetTop || 0}px`);
       this.updateLayoutForKeyboard();
       this.scrollFocusedInputIntoView();
-      this._scheduleViewportSettle({ scrollToBottom: true });
+      this._scheduleViewportSettle({ restoreScroll: true });
     };
 
     [80, 250, 600, 1000].forEach((delay) => setTimeout(refresh, delay));
@@ -637,7 +649,7 @@ const KeyboardHandler = {
 
     // visualViewport emits multiple heights throughout the OS animation.
     // Re-schedule on every event and fit only after the final height settles.
-    this._scheduleViewportSettle({ scrollToBottom: true });
+    this._scheduleViewportSettle({ restoreScroll: true });
 
     // Reposition subagent windows to stack from bottom (above keyboard)
     if (typeof app !== 'undefined') app.relayoutMobileSubagentWindows();
@@ -652,7 +664,7 @@ const KeyboardHandler = {
 
     this.resetLayout();
 
-    this._scheduleViewportSettle({ scrollToBottom: true });
+    this._scheduleViewportSettle({ restoreScroll: true });
 
     // Reposition subagent windows to stack from top (below header)
     if (typeof app !== 'undefined') app.relayoutMobileSubagentWindows();
@@ -669,10 +681,44 @@ const KeyboardHandler = {
    * fit against it resizes the PTY to transient dims and the SIGWINCH thrash
    * garbles the transcript.
    */
-  _scheduleViewportSettle({ scrollToBottom = false } = {}) {
-    this._settleScrollToBottom = this._settleScrollToBottom || scrollToBottom;
+  _scheduleViewportSettle({ restoreScroll = false } = {}) {
+    // Capture scroll intent on the FIRST event of a settle cycle, BEFORE any
+    // fit() has reflowed the buffer — a later capture reads an already-moved
+    // viewportY. Issue #259: this path used to force scrollToBottom
+    // unconditionally, so opening the keyboard yanked a user who was reading
+    // history down to the live output.
+    if (!this._settlePending) this._captureTerminalScrollIntent();
+    this._settleRestoreScroll = this._settleRestoreScroll || restoreScroll;
     this._settlePending = true;
     this._armViewportSettleTimer();
+  },
+
+  /**
+   * Record whether the terminal is following live output, and if not, the top
+   * visible line to return to. `_settleFollowing` defaults to true so a
+   * terminal we cannot read keeps the historical scroll-to-bottom behavior.
+   */
+  _captureTerminalScrollIntent() {
+    this._settleFollowing = true;
+    this._settleAnchorY = null;
+    if (typeof app === 'undefined' || !app.terminal?.buffer?.active) return;
+    this._settleFollowing = app.isTerminalAtBottom();
+    if (!this._settleFollowing) this._settleAnchorY = app.terminal.buffer.active.viewportY;
+  },
+
+  /**
+   * Return to the captured anchor after the keyboard reflow. Reflow can rewrap
+   * lines, so the anchor is approximate by construction; it is clamped to the
+   * post-reflow buffer rather than trusted blindly.
+   */
+  _restoreTerminalScrollIntent() {
+    const term = typeof app !== 'undefined' ? app.terminal : null;
+    const anchor = this._settleAnchorY;
+    if (typeof anchor !== 'number' || typeof term?.scrollToLine !== 'function' || !term.buffer?.active) {
+      term?.scrollToBottom?.();
+      return;
+    }
+    term.scrollToLine(Math.max(0, Math.min(anchor, term.buffer.active.baseY)));
   },
 
   /** Push a pending settle back while the viewport is still animating; no-op otherwise. */
@@ -686,8 +732,8 @@ const KeyboardHandler = {
     this._viewportSettleTimer = setTimeout(() => {
       this._viewportSettleTimer = null;
       this._settlePending = false;
-      const shouldScrollToBottom = this._settleScrollToBottom;
-      this._settleScrollToBottom = false;
+      const shouldRestoreScroll = this._settleRestoreScroll;
+      this._settleRestoreScroll = false;
 
       if (typeof app !== 'undefined' && app.terminal) {
         if (app.fitAddon) {
@@ -696,7 +742,12 @@ const KeyboardHandler = {
           } catch {}
         }
         if (this.keyboardVisible) this._shrinkPaddingToFit();
-        if (shouldScrollToBottom) app.terminal.scrollToBottom();
+        // Following live output → bottom, as before. Reading history → back to
+        // the pre-reflow anchor instead of being yanked down (#259).
+        if (shouldRestoreScroll) {
+          if (this._settleFollowing === false) this._restoreTerminalScrollIntent();
+          else app.terminal.scrollToBottom();
+        }
         app._syncMobileHelperTextareaToCursor?.();
         app._localEchoOverlay?.rerender?.();
         this._sendTerminalResize();
@@ -880,6 +931,7 @@ const SwipeHandler = {
   _touchStartHandler: null,
   _touchEndHandler: null,
   _element: null,
+  _ignoreGesture: false,
 
   /** Initialize swipe handling */
   init() {
@@ -908,6 +960,12 @@ const SwipeHandler = {
   },
 
   onTouchStart(e) {
+    // The session sidebar is an overlay child of .main, so its touches bubble in
+    // here. Swiping across the open session drawer — the natural "dismiss it"
+    // gesture — would otherwise fire nextSession() and drop the user into a
+    // session they never tapped.
+    this._ignoreGesture = !!e.target?.closest?.('.session-sidebar');
+    if (this._ignoreGesture) return;
     if (!e.touches || e.touches.length !== 1) return;
     this.startX = e.touches[0].clientX;
     this.startY = e.touches[0].clientY;
@@ -915,6 +973,10 @@ const SwipeHandler = {
   },
 
   onTouchEnd(e) {
+    if (this._ignoreGesture) {
+      this._ignoreGesture = false;
+      return;
+    }
     if (!e.changedTouches || e.changedTouches.length !== 1) return;
 
     const endX = e.changedTouches[0].clientX;

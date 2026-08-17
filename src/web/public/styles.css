@@ -50,6 +50,9 @@
   --header-height: 36px;
   --toolbar-height: 42px;
   --app-top: 0px;
+  --sidebar-width: 260px;
+  --sidebar-width-collapsed: 44px; /* == --touch-target-min */
+  --sidebar-transition: 0.18s ease;
   --glass-bg: rgba(31, 38, 48, 0.85);
   --glass-border: rgba(255, 255, 255, 0.08);
   --control-bg: rgba(255, 255, 255, 0.045);
@@ -330,7 +333,8 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
   .search-badge-session,
   .history-view-all-btn,
   .session-tab .tab-mode.gemini,
-  .session-tab .tab-mode.antigravity
+  .session-tab .tab-mode.antigravity,
+  .session-tab .tab-mode.pi
 ) {
   color: var(--accent-d);
 }
@@ -1479,23 +1483,80 @@ html[data-line-anim="packet"] .connection-line.line-enter {
   color: var(--green);
 }
 
-/* Tab alert animations */
-.session-tab.tab-alert-action {
+/* Tab alerts: a STEADY red/yellow base with a pulse breathing on top.
+   ⚠ The original animation swung background AND border to transparent at its
+   0%/100% keyframes, so for roughly half of every cycle an alerted tab was
+   indistinguishable from a normal one: a glance (or a screenshot, owner report
+   2026-08-15) read "no alert" while the home rail showed a steady NEEDS YOU.
+   A pending permission is BLOCKING the agent, so the tab must look blocked at
+   every instant; only the intensity is allowed to move. The status dot joins
+   in (red/yellow, (0,4,0) so it outranks the skin block's (0,3,1) dot rules),
+   mirroring the phone overview's red-row language. */
+/* The alert paints on ::before, NEVER on the tab element: .session-tab.active
+   forces background/border/box-shadow with !important, and !important beats
+   even a running animation, so an element-level alert vanished the moment the
+   tab was selected. The permission is still blocking while you look at it, so
+   the red ring must survive selection and clear only on resolution (owner call
+   2026-08-15). Same convention as the entrance styles (see the tab-enter block).
+   (0,3,x) via the strip parent on purpose: the non-OG skin block quiets
+   decorative glows (`.tab-glow { box-shadow: none }` lands at (0,2,1)), and an
+   alert halo is signal, not decor, so it must outrank that on every skin.
+   The overlay paints above the tab's inline content (positioned vs flow), which
+   is fine at these alphas and is exactly what keeps it visible over the active
+   tab's opaque-ish background. */
+.session-tabs .session-tab.tab-alert-action::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  pointer-events: none;
+  /* Explicit: .tab-enter::before (entrance animations) parks ::before at
+     opacity 0 with fill-mode both, and an alerted tab that is also entering
+     would otherwise inherit that and render an invisible alert. Our animation
+     shorthand already displaces theirs at this specificity; the opacity must
+     be pinned the same way. */
+  opacity: 1;
+  border: 2px solid var(--red);
+  background: rgba(239, 68, 68, 0.12);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
   animation: tab-blink-red 2.5s ease-in-out infinite;
 }
 
-.session-tab.tab-alert-idle {
+.session-tab.tab-alert-action .tab-status.idle,
+.session-tab.tab-alert-action .tab-status.busy,
+.session-tab.tab-alert-action .tab-status {
+  background: var(--red);
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.7);
+}
+
+.session-tabs .session-tab.tab-alert-idle::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 1; /* see the action variant above */
+  border: 2px solid var(--yellow);
+  background: rgba(234, 179, 8, 0.1);
+  box-shadow: 0 0 8px rgba(234, 179, 8, 0.35);
   animation: tab-blink-yellow 3.5s ease-in-out infinite;
 }
 
+.session-tab.tab-alert-idle .tab-status.idle,
+.session-tab.tab-alert-idle .tab-status.busy,
+.session-tab.tab-alert-idle .tab-status {
+  background: var(--yellow);
+  box-shadow: 0 0 6px rgba(234, 179, 8, 0.6);
+}
+
 @keyframes tab-blink-red {
-  0%, 100% { background: transparent; border-color: transparent; }
-  50% { background: rgba(239, 68, 68, 0.12); border-color: var(--red); }
+  0%, 100% { background: rgba(239, 68, 68, 0.12); box-shadow: 0 0 8px rgba(239, 68, 68, 0.4); }
+  50% { background: rgba(239, 68, 68, 0.3); box-shadow: 0 0 16px rgba(239, 68, 68, 0.75); }
 }
 
 @keyframes tab-blink-yellow {
-  0%, 100% { background: transparent; border-color: transparent; }
-  50% { background: rgba(234, 179, 8, 0.1); border-color: var(--yellow); }
+  0%, 100% { background: rgba(234, 179, 8, 0.1); box-shadow: 0 0 8px rgba(234, 179, 8, 0.35); }
+  50% { background: rgba(234, 179, 8, 0.24); box-shadow: 0 0 14px rgba(234, 179, 8, 0.65); }
 }
 
 @keyframes pulse {
@@ -2141,13 +2202,20 @@ html[data-line-anim="packet"] .connection-line.line-enter {
 /* Pop-out button is opt-in (App Settings → Tab Bar, default off; per-device).
    settings-ui.js mirrors the setting as the tabs-show-detach class on <html>.
    A tab that is ALREADY detached keeps its icon regardless: it is the
-   re-focus affordance for the popped-out window. */
-html:not(.tabs-show-detach) .session-tab:not(.detached) .tab-detach {
+   re-focus affordance for the popped-out window. A SINGLE tab can also opt in
+   via Session Options → Session (`tab-show-detach` on the tab, per-device map
+   in session-ui.js) while the general toggle stays off; the active-tab reveal
+   rules above are shared, so the overridden tab behaves identically. Phones are
+   unaffected either way: mobile.css hides .tab-detach with !important. */
+html:not(.tabs-show-detach) .session-tab:not(.detached):not(.tab-show-detach) .tab-detach {
   display: none;
 }
 
 /* ===== Solo (detached single-session) window chrome ===================== */
 body.solo-mode .session-tabs,
+body.solo-mode .session-tabs-host,
+body.solo-mode .session-sidebar,
+body.solo-mode .btn-sidebar-toggle,
 body.solo-mode .header-system-stats,
 body.solo-mode .header-tokens,
 body.solo-mode .btn-notifications,
@@ -2218,6 +2286,11 @@ body.solo-mode .btn-lifecycle-log {
 .session-tab .tab-mode.antigravity {
   background: rgba(34, 211, 238, 0.2);
   color: #22d3ee;
+}
+
+.session-tab .tab-mode.pi {
+  background: rgba(244, 114, 182, 0.2);
+  color: #f472b6;
 }
 
 .session-tab .tab-backend {
@@ -3280,6 +3353,83 @@ body.solo-mode .btn-lifecycle-log {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Anchor for the partial-history banner, which overlays rather than stacks. */
+  position: relative;
+}
+
+/* Partial-history banner (#258).
+   OVERLAY, not a flex child, on purpose: FitAddon derives rows/cols from the
+   terminal parent's computed height, so a banner that occupied real layout
+   space would SIGWINCH the CLI every time truncation state changed and make
+   Ink repaint the world. Floating it costs a few covered rows at the top,
+   which the dismiss button releases. */
+.history-trunc-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 6; /* under the local-echo overlay (7), over terminal content */
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-dim);
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 22%);
+}
+
+/* `.history-trunc-bar` sets display:flex, which outranks the hidden attribute's
+   UA display:none — without this the banner can never be hidden. */
+.history-trunc-bar[hidden] {
+  display: none;
+}
+
+.history-trunc-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.history-trunc-load {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.history-trunc-load:hover:not(:disabled) {
+  background: var(--border-light);
+}
+
+.history-trunc-load:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.history-trunc-dismiss {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.history-trunc-dismiss:hover {
+  color: var(--text);
+  background: var(--bg-hover);
 }
 
 .terminal-container {
@@ -3466,6 +3616,23 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   box-shadow: 0 4px 20px rgba(34, 211, 238, 0.3), 0 0 40px rgba(8, 145, 178, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   border-color: rgba(103, 232, 249, 0.5);
   color: #ecfeff;
+  transform: translateY(-1px);
+}
+
+/* Pi (pi.dev): rose identity, matching .btn-toolbar.btn-run.mode-pi and
+   .run-mode-dot.pi so the welcome action reads as the same backend. */
+.welcome-btn-pi {
+  background: linear-gradient(135deg, #33121f 0%, #9d174d 55%, #be185d 100%);
+  border-color: rgba(244, 114, 182, 0.4);
+  color: #fce7f3;
+  box-shadow: 0 2px 8px rgba(244, 114, 182, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.welcome-btn-pi:hover {
+  background: linear-gradient(135deg, #4a1a2c 0%, #be185d 55%, #db2777 100%);
+  box-shadow: 0 4px 20px rgba(244, 114, 182, 0.3), 0 0 40px rgba(190, 24, 93, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(249, 168, 212, 0.5);
+  color: #fff1f7;
   transform: translateY(-1px);
 }
 
@@ -4539,6 +4706,26 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   color: #fffbeb;
 }
 
+/* Pi mode colors. NOTE: this base-sheet pair only renders on the `og` skin — the
+   nested `html:not([data-skin="og"])` block further down re-declares
+   `.btn-toolbar.btn-run` at a HIGHER specificity, which is why gemini's and
+   antigravity's gradients are dead on the default skin. Pi therefore also carries
+   a rule inside that block (search `.btn-toolbar.btn-run.mode-pi`). */
+.btn-toolbar.btn-run.mode-pi,
+.btn-toolbar.btn-run-gear.mode-pi {
+  background: linear-gradient(135deg, #33121f 0%, #9d174d 55%, #be185d 100%);
+  border-color: rgba(244, 114, 182, 0.5);
+  color: #fce7f3;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.btn-toolbar.btn-run.mode-pi:hover,
+.btn-toolbar.btn-run-gear.mode-pi:hover {
+  background: linear-gradient(135deg, #4a1a2c 0%, #be185d 55%, #db2777 100%);
+  box-shadow: 0 0 12px rgba(244, 114, 182, 0.35), 0 2px 8px rgba(190, 24, 93, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-color: rgba(249, 168, 212, 0.6);
+  color: #fff1f7;
+}
+
 /* Dropdown menu */
 .run-mode-menu {
   display: none;
@@ -4628,6 +4815,7 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 .run-mode-dot.codex { background: #a855f7; }
 .run-mode-dot.gemini { background: #8ab4f8; }
 .run-mode-dot.antigravity { background: #22d3ee; }
+.run-mode-dot.pi { background: #f472b6; }
 .run-mode-dot.shell { background: #94a3b8; }
 .run-mode-dot.custom { background: #f59e0b; }
 
@@ -9872,36 +10060,65 @@ kbd {
    Deliberately quieter and thinner than the subagent lines above so the two
    layers read as different things in the same SVG.
 
-   Colour comes from --session-purple, which EVERY skin block already defines and
-   already tunes for its own background, so one rule covers all seven (the four
-   light skins included). Do not add a per-skin `.lineage-line` override inside the
-   html:not([data-skin="og"]) block: a bare class rule in there resolves to (0,2,1)
-   and would outrank this one from a surprising place. */
+   Colour: every rule reads --lineage-color, which session-lineage.js sets INLINE
+   per line from the CodemanLineage.COLORS palette (per child, first-seen order,
+   owner call 2026-08-15: several connected tabs must get several colours). The
+   FIRST line gets no override, so it falls through to --session-blue, which EVERY
+   skin block already defines and tunes for its own background; a lone arc therefore
+   still renders the skin-aware blue that shipped in 1.18.2. Do not add a per-skin
+   `.lineage-line` override inside the html:not([data-skin="og"]) block: a bare
+   class rule in there resolves to (0,2,1) and would outrank this one from a
+   surprising place.
+
+   ⚠ BLUE, NOT THE VIOLET THIS SHIPPED WITH (owner call, 2026-08-14: "make these
+   lines in blue that they are better visible"). Violet sits close to the terminal's
+   own dim foreground and lost contrast the moment it crossed text. Hue therefore no
+   longer separates this layer from the subagent lines, so the separation rests
+   entirely on SHAPE (this one hangs under the strip and never reaches a window),
+   weight and dash: keep those differences intact. Per skin the two are not even the
+   same blue, since --session-blue is tuned per palette while the subagent rule
+   hardcodes #3b82f6. */
+/* ⚠ QUIETER THAN THE SUBAGENT LINES, NOT INVISIBLE. The first cut ran 2px at 0.55
+   with a single 5px glow, which reads on a design mock and disappears on a real
+   1080p desktop: a faint thread over terminal text, exactly what it is drawn on
+   top of. The weight stays UNDER the subagent lines' 3px so the two layers still
+   separate, and the second, wider glow is what buys the contrast instead: it lifts
+   the line off the terminal without thickening it. Dashes scale with the stroke
+   (4 4 on a 2.5px line reads as a dotted smudge), and `lineage-flow` marches by
+   exactly two dash cycles, so it has to move with them. */
 .connection-line.lineage-line {
-  stroke: var(--session-purple, #a98fe0);
-  stroke-width: 2;
-  stroke-dasharray: 4 4;
+  stroke: var(--lineage-color, var(--session-blue, #2b8fd9));
+  stroke-width: 2.5;
+  stroke-dasharray: 5 5;
   stroke-linecap: round;
-  opacity: 0.55;
-  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.55)) drop-shadow(0 0 5px var(--session-purple, #a98fe0));
+  opacity: 0.72;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.7)) drop-shadow(0 0 5px var(--lineage-color, var(--session-blue, #2b8fd9)))
+    drop-shadow(0 0 11px var(--lineage-color, var(--session-blue, #2b8fd9)));
+}
+
+/* ⚠ OUTSIDE the reduced-motion block below on purpose. A working child is the case
+   the line exists to signal, and pairing the brightness with the marching dashes
+   left every worker's arc at the resting 0.72 for anyone who turns motion off. */
+.connection-line.lineage-line--working {
+  opacity: 0.95;
 }
 
 .connection-line.lineage-line:hover {
-  opacity: 0.9;
-  stroke-width: 2.5;
+  opacity: 1;
+  stroke-width: 3;
 }
 
 .lineage-line-dot {
-  fill: var(--session-purple, #a98fe0);
-  opacity: 0.7;
-  filter: drop-shadow(0 0 4px var(--session-purple, #a98fe0));
+  fill: var(--lineage-color, var(--session-blue, #2b8fd9));
+  opacity: 0.85;
+  filter: drop-shadow(0 0 4px var(--lineage-color, var(--session-blue, #2b8fd9)))
+    drop-shadow(0 0 9px var(--lineage-color, var(--session-blue, #2b8fd9)));
 }
 
 /* The child end marches while that worker is actually working, so the line
    itself carries the signal. Motion is opt-out-able at the OS level. */
 @media (prefers-reduced-motion: no-preference) {
   .connection-line.lineage-line--working {
-    opacity: 0.85;
     animation: lineage-flow 1.1s linear infinite;
   }
 
@@ -9911,20 +10128,24 @@ kbd {
   }
 }
 
+/* Two full dash cycles, so the march loops seamlessly. Tied to `stroke-dasharray`
+   above: at `5 5` the cycle is 10px, so this is -20 rather than the -16 that
+   matched the old `4 4`. Leaving them out of step makes the dashes jump once per
+   iteration. */
 @keyframes lineage-flow {
   to {
-    stroke-dashoffset: -16;
+    stroke-dashoffset: -20;
   }
 }
 
 @keyframes lineage-dot-pulse {
   0%, 100% {
-    opacity: 0.6;
-    r: 3;
+    opacity: 0.75;
+    r: 3.5;
   }
   50% {
     opacity: 1;
-    r: 4;
+    r: 4.5;
   }
 }
 
@@ -10304,13 +10525,18 @@ kbd {
 
 /* ========== File Preview Overlay ========== */
 
+/* Above the response viewer (5000) and its backdrop (4999): a file path in the
+   chat opens this overlay, and at the old 2000 it rendered BEHIND the panel it
+   was launched from — the click looked dead. Same relationship the path picker
+   and its preview already have (10020 / 10030). Still below the toast and
+   picker band (10000+), so a "Saved" toast keeps landing on top. */
 .file-preview-overlay {
   position: fixed;
   inset: 0;
   background: var(--modal-backdrop);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-  z-index: 2000;
+  z-index: 5100;
   display: none;
   align-items: center;
   justify-content: center;
@@ -12862,6 +13088,16 @@ kbd {
   border-bottom-color: var(--accent);
 }
 
+/* File paths linkified out of the message text. Monospace so a path still reads
+   as a path in prose, and break-all because these are long and the viewer is
+   narrow on a phone. Colour/underline come from the .rv-text a rule above. */
+.rv-text a.rv-path {
+  font-family: 'Fira Code', 'JetBrains Mono', 'SF Mono', Menlo, Monaco, monospace;
+  font-size: 0.92em;
+  word-break: break-all;
+  cursor: pointer;
+}
+
 /* Tables — scroll wrapper keeps table proper while allowing horizontal overflow */
 .rv-table-wrap {
   margin: 1em 0;
@@ -14483,6 +14719,17 @@ html:not([data-skin="og"]) {
   color: #061c20;
 }
 .btn-toolbar.btn-run.mode-codex:hover { box-shadow: 0 0 14px -2px rgba(43, 203, 187, 0.45); }
+/* Pi keeps its rose identity on the non-og skins. This rule has to live INSIDE
+   this nested block: the generic `.btn-toolbar.btn-run` above resolves to (0,3,1)
+   here and would otherwise beat the base sheet's (0,3,0) `.mode-pi` pair, which
+   is exactly why gemini's and antigravity's gradients render as generic claude
+   blue on the default skin. */
+.btn-toolbar.btn-run.mode-pi {
+  background: linear-gradient(135deg, #be185d, #f472b6);
+  border-color: #be185d;
+  color: #fff1f7;
+}
+.btn-toolbar.btn-run.mode-pi:hover { box-shadow: 0 0 14px -2px rgba(244, 114, 182, 0.45); }
 .btn-toolbar.btn-run-gear {
   background: var(--accent-d);
   border-color: var(--accent);
@@ -15370,8 +15617,9 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 }
 
 /* The freshest signal on the row: while a session is actually doing something,
-   its "active" stamp is the one the eye should land on. */
-.home-sessions-row--working .home-sessions-meta-active {
+   how long it has been doing it is what the eye should land on (and it is what
+   the rail is sorted by). */
+.home-sessions-row--working .home-sessions-meta-since {
   color: var(--green);
   opacity: 0.95;
 }
@@ -17064,4 +17312,245 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 #sessionOptionsModal .session-respawn-status {
   font-size: 0.8rem;
   padding: 4px 9px;
+}
+
+/* ============================================================
+   === Collapsible session sidebar (opt-in layout) ===
+   Appended at top level ON PURPOSE: styles.css:12171-12390 is one
+   html:not([data-skin="og"]) { … } native-nesting block whose bare
+   selectors resolve at (0,2,x) and re-tone .session-tab with
+   !important. Everything below is LAYOUT ONLY (flex/size/overflow/
+   display) and sets no colour on .session-tab, so it composes with
+   every skin instead of fighting it. Keep it that way.
+
+   The list itself is not a second DOM tree: applySessionListLayout()
+   moves the one #sessionTabs element between #sessionTabsHost (header)
+   and #sessionSidebarList (this aside).
+   ============================================================ */
+
+/* Header host — wraps #sessionTabs so the strip can be hidden without
+   touching the element that gets re-parented. */
+.session-tabs-host {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+html[data-session-list="sidebar"] .session-tabs-host {
+  display: none;
+}
+
+/* The header only needs flex-start to support the two-row strip; with the
+   strip gone the remaining header chrome should sit centered. */
+html[data-session-list="sidebar"] .header {
+  align-items: center;
+}
+
+.session-sidebar {
+  display: none;
+}
+
+html[data-session-list="sidebar"] .session-sidebar {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 var(--sidebar-width);
+  width: var(--sidebar-width);
+  min-width: 0;
+  background: var(--bg-card);
+  border-right: 1px solid var(--border);
+  /* Own stacking context ABOVE .welcome-overlay (z-index 10, which is what a
+     user with no open session sees) but BELOW .toolbar (20) — raising it to or
+     past 20 makes the Run menu unclickable again. */
+  position: relative;
+  z-index: 11;
+  transition: flex-basis var(--sidebar-transition), width var(--sidebar-transition);
+  /* Deliberately NO contain:paint — .header has it, which is exactly why app.js
+     re-parents .subagent-dropdown to <body>. Leaving it off keeps per-row
+     dropdowns and the inline rename input paintable in place. */
+}
+
+html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar {
+  flex-basis: var(--sidebar-width-collapsed);
+  width: var(--sidebar-width-collapsed);
+}
+
+.session-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-shrink: 0;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--glass-border);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.session-sidebar-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.session-sidebar-filter {
+  display: flex;
+  flex-shrink: 0;
+  padding: 0.35rem 0.5rem;
+}
+
+.session-sidebar-filter-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.3rem 0.45rem;
+  background: var(--bg-input);
+  border: 1px solid var(--control-border);
+  border-radius: var(--btn-radius);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.75rem;
+  outline: none;
+}
+
+.session-sidebar-filter-input::placeholder {
+  color: var(--text-muted);
+}
+
+.session-sidebar-filter-input:focus-visible {
+  border-color: var(--accent);
+}
+
+/* Host for the relocated #sessionTabs. */
+.session-sidebar-list {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* --- The relocated strip, now vertical --------------------------------- */
+html[data-session-list="sidebar"] .session-sidebar .session-tabs {
+  flex-direction: column;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  gap: 2px;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0.25rem;
+}
+
+html[data-session-list="sidebar"] .session-sidebar .session-tab {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--btn-radius);
+}
+
+/* .tab-info is already column/overflow-hidden/min-width:0 — it only has to
+   claim the free width now that rows are full-width. */
+html[data-session-list="sidebar"] .session-sidebar .tab-info {
+  flex: 1;
+  min-width: 0;
+}
+
+html[data-session-list="sidebar"] .session-sidebar .tab-name {
+  max-width: none;
+}
+
+/* Reveal-on-hover reads badly on a 40px-tall full-width row, so keep the row
+   actions permanently visible on the active session — no layout jitter when
+   the pointer crosses the list. */
+html[data-session-list="sidebar"] .session-sidebar .session-tab.active .tab-gear,
+html[data-session-list="sidebar"] .session-sidebar .session-tab.active .tab-detach,
+html[data-session-list="sidebar"] .session-sidebar .session-tab.active .tab-close {
+  opacity: 1;
+  width: auto;
+}
+
+/* Drag-reorder indicators become horizontal edges. The class names stay
+   drag-over-left / drag-over-right (they read as before/after now) so app.js,
+   the base rules above and the generated gesture bundle need no renaming. */
+html[data-session-list="sidebar"] .session-sidebar .session-tab.drag-over-left {
+  box-shadow: 0 -2px 0 0 var(--accent);
+}
+
+html[data-session-list="sidebar"] .session-sidebar .session-tab.drag-over-right {
+  box-shadow: 0 2px 0 0 var(--accent);
+}
+
+/* Sidebar filter box (applySidebarFilter toggles this class post-render).
+   Scoped to the sidebar layout on purpose: applySidebarFilter() already strips
+   the class whenever the filter box is off screen, and this prefix is the
+   second lock — a leaked class must never be able to hide tabs from the header
+   strip, which has no filter control to clear it with. */
+html[data-session-list="sidebar"] .session-tab.tab-filtered-out {
+  display: none !important;
+}
+
+/* --- Collapsed rail ---------------------------------------------------- */
+/* Collapsed is a 44px icon rail, not "hidden": the ambient signal (status dot,
+   task/subagent/ultracode badges) is the whole point of mission control and
+   must survive collapse. The rail is also its own reopen affordance — clicking
+   a row still switches session.
+   NOT surviving: the name, the folder and the `sh`/`oc`/`cx`/`gm` mode chip —
+   the chip is rendered inside .tab-info (app.js row template), which the rail
+   hides. Moving it out of .tab-info just to keep it would change the shared row
+   markup for both layouts; agent type stays a hover/expand affordance. */
+html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar-head,
+html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar-filter {
+  display: none;
+}
+
+/* 44px rail minus the list's 0.25rem padding either side minus the row's 1px
+   borders leaves ~34px of content box. Number (16) + gap (5.6) + dot (6) + gap
+   (5.6) + one badge (16) already overflows that, and .tab-number / .tab-status
+   are flex-shrink: 0 — with justify-content: center the excess gets clipped at
+   BOTH ends, so the digit and the badge are cut in half. Two fixes, both
+   needed: drop the Alt+N hint (it is a keyboard affordance that only reads in
+   the expanded list; Alt+N itself keeps working), and let whatever is left wrap
+   instead of clipping, so a row carrying several badges just gets taller. */
+html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar .session-tab {
+  justify-content: center;
+  align-content: center;
+  flex-wrap: wrap;
+  row-gap: 2px;
+  padding: 0.4rem 0;
+}
+
+html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar .tab-info,
+html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar .tab-number,
+html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar .tab-gear,
+html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar .tab-detach,
+html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar .tab-close {
+  display: none;
+}
+
+/* The subagent badge carries a 4px left margin tuned for the horizontal strip;
+   in a centered 34px rail it pushes the row off-centre. */
+html[data-session-list="sidebar"][data-sidebar="collapsed"] .session-sidebar .tab-subagent-badge {
+  margin-left: 0;
+}
+
+/* --- Toggle button ----------------------------------------------------- */
+.btn-sidebar-toggle--hidden {
+  display: none !important;
+}
+
+/* .btn-icon-header:hover rotates 45deg globally — a panel glyph must not spin. */
+.btn-sidebar-toggle:hover {
+  transform: none;
+}
+
+html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle svg {
+  transform: scaleX(-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-sidebar {
+    transition: none;
+  }
 }

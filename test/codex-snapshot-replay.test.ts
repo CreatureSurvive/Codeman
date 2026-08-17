@@ -76,7 +76,7 @@ describe('xterm snapshot/replay (codex tab-switch)', () => {
 
     expect(refreshStart).toBeGreaterThan(-1);
     expect(resumeStart).toBeGreaterThan(-1);
-    expect(refreshBlock).toContain('full: event?.full === true');
+    expect(refreshBlock).toContain('_fetchTerminalBufferResponse(sessionId, { full: true })');
     expect(resumeBlock).toContain('full: true');
   });
 

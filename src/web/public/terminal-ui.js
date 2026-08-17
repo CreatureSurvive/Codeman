@@ -327,6 +327,17 @@ Object.assign(CodemanApp.prototype, {
         return true;
       }
 
+      // Session-sidebar toggle chord (default Alt+B): same trap as above —
+      // preventDefault() in the capture handler does not stop xterm, so without
+      // this gate every toggle would ALSO send ESC b (readline backward-word)
+      // into the live session and walk the cursor back through the user's
+      // half-typed prompt. Registry-aware and only while the sidebar layout is
+      // active, so a rebind/disable and the default header layout keep plain
+      // Meta-b working in the terminal.
+      if (ev.type === 'keydown' && this.shouldToggleSessionSidebarFromShortcut?.(ev)) {
+        return false;
+      }
+
       // Ctrl+V / Cmd+V: intercept before xterm sends ^V to PTY.
       // Route through our paste trap which handles both images and text.
       if ((ev.ctrlKey || ev.metaKey) && ev.key === 'v' && ev.type === 'keydown') {
@@ -1409,18 +1420,18 @@ Object.assign(CodemanApp.prototype, {
         // the whole tab on hover. Non-empty token + bounded reps is O(n).
         const cmdPattern = /\b(tail|cat|head|less|grep|watch|vim|nano)\s+(?:[^\s\/]+\s+){0,4}(\/[^\s"'<>|;&\n\x00-\x1f]+)/g;
 
-        // Pattern 2: Paths with common extensions.
-        // Image/PDF extensions are included so pasted-attachment paths
-        // (`.claude-images/paste-*.png`) are clickable; they open the file preview
-        // rather than the log viewer (see addLink).
-        const extPattern =
-          /(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\n\x00-\x1f]*\.(?:log|txt|json|md|yaml|yml|csv|xml|sh|py|ts|js|png|jpe?g|gif|webp|bmp|svg|pdf))\b/g;
+        // Pattern 2: Paths with common extensions. Image/PDF/media extensions are
+        // included so pasted-attachment paths (`.claude-images/paste-*.png`) and
+        // screenshots an agent just wrote are clickable; those open the file
+        // preview rather than the log viewer (see addLink).
+        //
+        // The literal lives in constants.js because the response viewer linkifies
+        // the SAME paths out of markdown — one definition, two consumers. A fresh
+        // instance per call: `lastIndex` is per-object state.
+        const extPattern = absoluteFilePathPattern();
 
         // Pattern 3: Bash() tool output
         const bashPattern = /Bash\([^)]*?(\/(?:home|tmp|var|etc|opt)[^\s"'<>|;&\)\n\x00-\x1f]+)/g;
-
-        /** Extensions that should open the image/document preview, not the log viewer. */
-        const PREVIEW_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'pdf']);
 
         const addLink = (filePath, matchIndex) => {
           const startCol = lineText.indexOf(filePath, matchIndex);
@@ -1440,9 +1451,19 @@ Object.assign(CodemanApp.prototype, {
             },
             activate(event, text) {
               // Tailing a PNG in the log viewer shows binary noise; the file preview
-              // already renders images and PDFs inline.
-              const ext = (text.split('.').pop() || '').toLowerCase();
-              if (PREVIEW_EXTS.has(ext)) {
+              // already renders images, PDFs, documents and media inline — and it
+              // now reaches files outside the workspace too, which is where an
+              // agent's screenshots and scratchpad captures actually land.
+              //
+              // Text goes to the log viewer, which follows a file that is still
+              // being written — but ONLY where it can actually read: it spawns
+              // `tail -f` and allows the workspace, /var/log and ~/logs, so an
+              // out-of-workspace path there answered "Path must be within
+              // working directory or allowed log directories" while the SAME
+              // path clicked in the response viewer previewed fine. The preview
+              // reads those through the guarded attachment routes, so external
+              // paths route there and the two surfaces agree.
+              if (previewsInFileViewer(text) || self._isExternalPreviewPath(text, self.activeSessionId)) {
                 self.openFilePreview(text, self.activeSessionId);
                 return;
               }
@@ -1733,7 +1754,7 @@ Object.assign(CodemanApp.prototype, {
     }
     titleSpan.appendChild(document.createTextNode(this._historyRowLabel(s, shortDir)));
 
-    // Badge row: mode (claude/codex/opencode/gemini/antigravity/shell) + a LIVE pill.
+    // Badge row: mode (claude/codex/opencode/gemini/antigravity/pi/shell) + a LIVE pill.
     const badgeRow = document.createElement('div');
     badgeRow.className = 'history-item-badges';
     if (s.mode) {
@@ -3016,10 +3037,17 @@ Object.assign(CodemanApp.prototype, {
     const activeSession = this.activeSessionId && this.sessions ? this.sessions.get(this.activeSessionId) : null;
     const MAX_FRAME_BYTES = activeSession?.mode === 'codex' ? 32768 : 65536;
     let deferred = false;
-    // If the user recently scrolled up, remember the viewport so we can restore
-    // it after the write — Codex status redraws would otherwise jump it.
+    // If the user is reading history, remember the viewport so we can restore it
+    // after the write — Codex status redraws would otherwise jump it.
+    //
+    // Position, not recency (#259). This was gated on _hasRecentUserScrollUp(),
+    // a 1500ms decay window, so a user who scrolled up and then actually READ
+    // for longer than that lost the protection mid-read and got dragged along by
+    // the next repaint. Being scrolled up IS the intent, however long ago it was
+    // expressed; the recency window remains as an extra guard on the sticky
+    // scroll-to-bottom below, where it protects against a mid-flush race.
     const preserveViewportY =
-      this._hasRecentUserScrollUp() && this.terminal.buffer?.active ? this.terminal.buffer.active.viewportY : null;
+      this.terminal.buffer?.active && !this.isTerminalAtBottom() ? this.terminal.buffer.active.viewportY : null;
 
     if (_joinedLen <= MAX_FRAME_BYTES) {
       this._writeTerminalOrdered(joined);

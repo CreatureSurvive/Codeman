@@ -202,25 +202,56 @@ function computeTabScrollLeft(input) {
 // spawned (a worker started through the codeman agent skill, which passes its own
 // id as parentSessionId). Pure: the caller measures and appends, this decides.
 //
-// Two shapes, because both endpoints live in ONE horizontal strip and the subagent
-// shape (tab-bottom → window-top) has nothing to aim at:
-//   - same row: a shallow U-bridge HANGING BELOW the strip, so it reads as a
-//     bracket joining two tabs rather than as a line crossing them. The dip grows
-//     with horizontal distance and with `depth` (the child's index among its
-//     siblings), so several children of one parent nest instead of overprinting.
-//   - different rows (desktop `tabs-two-rows` / `tabs-auto-wrap`): the vertical
-//     bezier the subagent lines already use, parent edge → child edge.
+// ONE shape, because both endpoints live in the same horizontal strip and the subagent
+// shape (tab-bottom → window-top) has nothing to aim at: a U-bridge HANGING BELOW the
+// strip, from the parent's bottom edge to the child's bottom edge, so it reads as a
+// bracket joining two tabs rather than as a line crossing them. The dip grows with
+// horizontal distance and with `depth` (the child's index among its siblings), so
+// several children of one parent nest instead of overprinting.
+//
+// ⚠ A WRAPPED STRIP USED TO GET ITS OWN SHAPE, AND THAT SHAPE WAS THE BUG. When the
+// desktop strip wraps (`tabs-two-rows` / `tabs-auto-wrap`) a parent on row 1 and its
+// child on row 2 are ~4px apart vertically, so the old parent-bottom → child-TOP bezier
+// had a 4px span to work with and drew a flat horizontal line inside the row gap
+// (reported as "they connect already, but the lines are straight and not easy visible"),
+// and three siblings drew three of them on top of each other. Aiming BOTH ends at the
+// tab BOTTOMS and putting the control points below the LOWER row gives the wrapped case
+// the same bracket as the flat case: it leaves the parent downward, crosses the lower
+// row once, and comes back up under the child. Same formula, no branch.
 //
 // Returns null when the edge must not be drawn: a missing/degenerate rect, or an
 // endpoint scrolled outside the strip. `.session-tabs` is `overflow-x: auto`, so a
 // scrolled-out tab still HAS a rect — one lying over the logo or the header
 // buttons. Skipping is honest; clamping would point at a tab that isn't there.
+// ⚠ THE DIP IS WHAT MAKES THE ARC AN ARC, and it has now been mis-tuned in BOTH
+// directions, so treat these numbers as a corridor rather than a dial to crank:
+// - Too shallow (the first ship, 44px cap): a skill worker is appended to the END of
+//   the strip, so a lead-to-worker span is 800-1500px, and a 44px cap over 1300px is
+//   a 33px sag, a line that reads as STRAIGHT across the terminal (#285).
+// - Too deep (the 104px cap that replaced it): in the wrapped-strip case the cap and
+//   the FULL row offset stacked, bowing the bracket ~106px into the terminal text
+//   (owner screenshot 2026-08-15, "die Linien machen einen grossen Bogen nach unten").
+// The dip is measured from the STRIP'S BOTTOM EDGE (falling back to the lower tab
+// bottom when the strip rect is missing or shorter than its tabs), which buys two
+// things at once: the bow needs no per-row offsets stacked on top, and a same-row
+// arc between ROW-1 tabs of a wrapped strip clears row 2's labels instead of being
+// drawn through them (the retune's own first draft had exactly that regression).
 const LINEAGE_DIP_BASE_PX = 14;
 const LINEAGE_DIP_PER_PX = 0.06;
-const LINEAGE_DIP_MIN_PX = 16;
-const LINEAGE_DIP_MAX_PX = 44;
-const LINEAGE_SIBLING_STEP_PX = 6;
+const LINEAGE_DIP_MIN_PX = 22;
+const LINEAGE_DIP_MAX_PX = 64;
+// Siblings nest by this much. Widened with the stroke: at 2.5px plus its glow, arcs 6px
+// apart bled into one thick band instead of reading as three separate lines.
+const LINEAGE_SIBLING_STEP_PX = 8;
 const LINEAGE_STRIP_TOLERANCE_PX = 4;
+// Lineage palette, assigned per CHILD in first-seen order and cycled (session-lineage.js).
+// The empty FIRST entry means "no override": the CSS then falls back to --session-blue,
+// which every skin block tunes for its own background, so a lone arc keeps the
+// skin-aware blue that shipped in 1.18.2. The fixed entries are deliberately vivid
+// (owner call 2026-08-15: matrix green, pinkish, violet, red, turquoise "and so on");
+// they ride the same double glow as the blue, which is what keeps them legible over
+// terminal text on every skin.
+const LINEAGE_COLORS = ['', '#00ff66', '#ff5ea8', '#a78bfa', '#ff5252', '#2dd4bf', '#ffa940'];
 
 function computeLineagePath(input) {
   const parent = input?.parent;
@@ -251,29 +282,21 @@ function computeLineagePath(input) {
   const cBottom = cTop + ch;
   const sameRow = Math.abs(pTop + ph / 2 - (cTop + ch / 2)) <= Math.min(ph, ch) / 2;
 
-  let d;
-  let endX;
-  let endY;
-  if (sameRow) {
-    const y0 = Math.max(pBottom, cBottom);
-    const span = Math.abs(cx - px);
-    const dip =
-      Math.min(LINEAGE_DIP_MAX_PX, Math.max(LINEAGE_DIP_MIN_PX, LINEAGE_DIP_BASE_PX + span * LINEAGE_DIP_PER_PX)) +
-      depth * LINEAGE_SIBLING_STEP_PX;
-    const yc = y0 + dip;
-    d = `M ${r1(px)} ${r1(y0)} C ${r1(px)} ${r1(yc)}, ${r1(cx)} ${r1(yc)}, ${r1(cx)} ${r1(y0)}`;
-    endX = cx;
-    endY = y0;
-  } else {
-    const childBelow = cTop + ch / 2 > pTop + ph / 2;
-    const y1 = childBelow ? pBottom : pTop;
-    const y2 = childBelow ? cTop : cBottom;
-    const mid = (y1 + y2) / 2;
-    d = `M ${r1(px)} ${r1(y1)} C ${r1(px)} ${r1(mid)}, ${r1(cx)} ${r1(mid)}, ${r1(cx)} ${r1(y2)}`;
-    endX = cx;
-    endY = y2;
-  }
-  return { d, endX, endY, sameRow };
+  // Both ends anchor on the tab BOTTOM, and the control points hang below the WHOLE
+  // strip, so one formula covers a flat strip, a wrapped pair, and a same-row pair
+  // sitting above further rows (see the corridor note above the constants).
+  const span = Math.abs(cx - px);
+  const stripBottom =
+    strip && Number(strip.height) > 0 && Number.isFinite(Number(strip.top))
+      ? Number(strip.top) + Number(strip.height)
+      : Number.NEGATIVE_INFINITY;
+  const baseline = Math.max(pBottom, cBottom, stripBottom);
+  const dip =
+    Math.min(LINEAGE_DIP_MAX_PX, Math.max(LINEAGE_DIP_MIN_PX, LINEAGE_DIP_BASE_PX + span * LINEAGE_DIP_PER_PX)) +
+    depth * LINEAGE_SIBLING_STEP_PX;
+  const yc = baseline + dip;
+  const d = `M ${r1(px)} ${r1(pBottom)} C ${r1(px)} ${r1(yc)}, ${r1(cx)} ${r1(yc)}, ${r1(cx)} ${r1(cBottom)}`;
+  return { d, endX: cx, endY: cBottom, sameRow };
 }
 
 // One decimal is plenty for a screen-space path and keeps the `d` string short.
@@ -380,6 +403,129 @@ function computeConnectionLossUi(input) {
   };
 }
 
+// SSE staleness policy: is this stream a zombie?
+//
+// An EventSource that stops delivering does not always error. A proxy that
+// idle-closed the connection, a laptop resumed from sleep, a tailnet
+// reconnect: `onerror` never fires, the header dot stays green, and every
+// SSE-driven surface (tab status dots, sessions created on another device,
+// renames) freezes until the user reloads. The server writes a
+// `sse:heartbeat` frame every 15s, so silence longer than three of them means
+// the stream is dead even though the transport still claims otherwise.
+//
+// Stale ONLY when the transport believes it is 'connected': the other states
+// already have the reconnect/backoff machinery running, and re-firing on top
+// of them would stack reconnects. That guard is also the loop breaker: a
+// forced reconnect leaves 'connected' immediately, so the watchdog cannot
+// fire again while one is in flight. `navigator.onLine === false` is not
+// staleness either; there is nothing to reconnect to yet.
+//
+// Pure: no DOM, no timers, no side effects. `now` is passed in.
+const SSE_STALE_TIMEOUT_MS = 45000; // three missed 15s heartbeats
+
+function computeSseStale(input) {
+  const {
+    lastMessageAt = null,
+    now = 0,
+    status = 'connected',
+    isOnline = true,
+    timeoutMs = SSE_STALE_TIMEOUT_MS,
+  } = input || {};
+  if (!isOnline || status !== 'connected') return false;
+  // No frame has ever arrived: `init` lands on connect, so this is a stream
+  // that has not opened yet rather than one that went quiet.
+  if (typeof lastMessageAt !== 'number' || !(lastMessageAt > 0)) return false;
+  return now - lastMessageAt >= timeoutMs;
+}
+
+// Home-screen session order: one comparator for both overviews.
+//
+// The phone overview (mobile-overview.js) and the desktop tab rail
+// (home-sessions.js) list the same sessions, so they answer the same question
+// and must answer it the same way: "which of these wants me next?".
+//
+//   1. Anything blocked on a human first (red question, then error, then a
+//      yellow idle prompt), longest-blocked at the top: a session that has been
+//      sitting on a permission dialog for 20 minutes is starving, one that
+//      raised it 5 seconds ago is not.
+//   2. Then whatever is running, LONGEST-RUNNING first, since that is the turn most
+//      likely to be finished, or stuck, by the time you look.
+//   3. Then everything quiet, MOST RECENTLY quiet first: when nothing is
+//      running, the session that just finished is the one you came back for,
+//      and the one you abandoned yesterday sinks.
+//
+// So the tiebreak flips direction halfway down the list, and that is the point:
+// for a state something is still doing, longer = more urgent; for a state
+// something has stopped in, more recent = more relevant.
+//
+// Pure: no DOM, no clock (every input is an epoch-ms stamp already on the
+// session payload), no `this`. Unit-tested in test/session-overview-order.test.ts.
+const SESSION_ACTIVITY_RANK = {
+  needs: 0,
+  error: 1,
+  waiting: 2,
+  working: 3,
+  idle: 4,
+  done: 5,
+};
+
+/** States still in progress, where the OLDEST stamp sorts first. */
+const SESSION_ACTIVITY_OLDEST_FIRST = ['needs', 'error', 'waiting', 'working'];
+
+/**
+ * When the row entered the state it is in.
+ *
+ * For everything quiet that is `lastActivityAt`, the last byte the pane printed:
+ * a Claude pane sitting at its composer prints nothing, so the end of the last
+ * turn is exactly when it went quiet.
+ *
+ * A WORKING pane is the opposite: it repaints about once a second, so its
+ * last-activity stamp is always "now" and would rank every running turn as
+ * freshly started. Its real start is the pane's last Enter (`lastSubmitAt`),
+ * persisted server-side and therefore stable across a Codeman restart. A
+ * working pane that has never submitted (spawned with its prompt on the command
+ * line, or an external CLI) falls back to last activity, which puts it at the
+ * short end of the running group rather than falsely at the head of it.
+ */
+function sessionActivityAnchor(row) {
+  const activeAt = Number(row && row.lastActivityAt) || 0;
+  if (row && row.state === 'working') return Number(row.lastSubmitAt) || activeAt;
+  return activeAt;
+}
+
+/**
+ * Sort comparator for one overview row against another.
+ * @param {{state: string, lastActivityAt?: number, lastSubmitAt?: number, orderIndex?: number}} a
+ * @param {{state: string, lastActivityAt?: number, lastSubmitAt?: number, orderIndex?: number}} b
+ */
+function compareSessionActivity(a, b) {
+  const rankA = SESSION_ACTIVITY_RANK[a.state];
+  const rankB = SESSION_ACTIVITY_RANK[b.state];
+  const rank = (rankA === undefined ? 99 : rankA) - (rankB === undefined ? 99 : rankB);
+  if (rank !== 0) return rank;
+
+  const atA = sessionActivityAnchor(a);
+  const atB = sessionActivityAnchor(b);
+  if (atA !== atB) {
+    // A row with no stamp at all gets no opinion: it sorts last either way
+    // rather than claiming to be the oldest (0) thing on the screen.
+    if (!atA) return 1;
+    if (!atB) return -1;
+    return SESSION_ACTIVITY_OLDEST_FIRST.includes(a.state) ? atA - atB : atB - atA;
+  }
+
+  // Equal stamps (or two unstamped rows): fall back to the user's tab order so
+  // the list is deterministic and cannot shuffle between renders.
+  const orderA = Number.isFinite(a.orderIndex) ? a.orderIndex : Number.MAX_SAFE_INTEGER;
+  const orderB = Number.isFinite(b.orderIndex) ? b.orderIndex : Number.MAX_SAFE_INTEGER;
+  return orderA - orderB;
+}
+
+/** Copy of `rows`, in overview order. Never sorts in place, so callers keep their array. */
+function sortSessionsByActivity(rows) {
+  return (Array.isArray(rows) ? rows.slice() : []).sort(compareSessionActivity);
+}
+
 if (typeof window !== 'undefined') {
   window.WEBGL_FALLBACK = WEBGL_FALLBACK;
   window.evaluateWebGLLongTaskTrip = evaluateWebGLLongTaskTrip;
@@ -397,10 +543,21 @@ if (typeof window !== 'undefined') {
     DIP_MIN_PX: LINEAGE_DIP_MIN_PX,
     DIP_MAX_PX: LINEAGE_DIP_MAX_PX,
     SIBLING_STEP_PX: LINEAGE_SIBLING_STEP_PX,
+    COLORS: LINEAGE_COLORS,
   };
   window.CodemanConnectionLoss = {
     compute: computeConnectionLossUi,
     GRACE_MS: CONNECTION_LOSS_GRACE_MS,
+  };
+  window.CodemanSseStale = {
+    compute: computeSseStale,
+    TIMEOUT_MS: SSE_STALE_TIMEOUT_MS,
+  };
+  window.CodemanSessionOrder = {
+    RANK: SESSION_ACTIVITY_RANK,
+    anchor: sessionActivityAnchor,
+    compare: compareSessionActivity,
+    sort: sortSessionsByActivity,
   };
 }
 
@@ -514,6 +671,9 @@ const BUILTIN_RESPAWN_PRESETS = [
 const SSE_EVENTS = {
   // Core
   INIT: 'init',
+
+  // Transport
+  HEARTBEAT: 'sse:heartbeat',
 
   // Session lifecycle
   SESSION_CREATED: 'session:created',
@@ -743,4 +903,138 @@ const _htmlEscapePattern = /[&<>"']/g;
 function escapeHtml(text) {
   if (typeof text !== 'string') return '';
   return text.replace(_htmlEscapePattern, (ch) => _htmlEscapeMap[ch]);
+}
+
+/**
+ * Human-readable byte size for the partial-history banner (#258).
+ *
+ * Deliberately coarse: the banner is telling the user roughly how much of a
+ * transcript they are looking at, not accounting for bytes. Sub-KB amounts read
+ * as "less than 1 KB" rather than an exact count nobody can act on.
+ *
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatHistoryBytes(bytes) {
+  const n = typeof bytes === 'number' && isFinite(bytes) && bytes > 0 ? bytes : 0;
+  if (n < 1024) return 'less than 1 KB';
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Decide what the partial-history banner should say (#258).
+ *
+ * PURE so the three states can be tested without a DOM. They exist because one
+ * `truncated` boolean could not distinguish messages the user acts on very
+ * differently:
+ *   - recoverable: we tailed for speed and the rest is still retained
+ *   - atCeiling:   the FULL capture itself hit the byte ceiling
+ *   - exhausted:   a full pull was refused as a downgrade, so this is all there is
+ *
+ * @param {{truncated?: boolean, reason?: string|null, source?: string|null,
+ *          fullSize?: number, retainedBytes?: number, exhausted?: boolean}} state
+ * @returns {{visible: boolean, message: string, canLoadMore: boolean}}
+ */
+function computeHistoryTruncationNotice(state = {}) {
+  if (!state.truncated) return { visible: false, message: '', canLoadMore: false };
+
+  const retained = Math.max(0, state.retainedBytes || 0);
+  const dropped = Math.max(0, (state.fullSize || 0) - retained);
+  const shown = formatHistoryBytes(retained);
+  // A full-history capture that was STILL capped is already everything tmux
+  // holds, so the remainder is out of reach rather than one request away.
+  const atCeiling = state.source === 'mux-full-history' && state.reason === 'capped';
+
+  if (state.exhausted) {
+    return {
+      visible: true,
+      message: `Showing all ${shown} of retained history. Earlier output is no longer kept for this session.`,
+      canLoadMore: false,
+    };
+  }
+  if (atCeiling) {
+    return {
+      visible: true,
+      message: `Showing the most recent ${shown}. Earlier output exceeds the retained history limit and cannot be recovered.`,
+      canLoadMore: false,
+    };
+  }
+  return {
+    visible: true,
+    message: `Showing the most recent ${shown} of this session. ${formatHistoryBytes(dropped)} more may still be retained.`,
+    canLoadMore: true,
+  };
+}
+
+/**
+ * Where to land after a rewrite that REPLACES the whole buffer (#259).
+ *
+ * The backpressure refresh clears the terminal and reloads it from a freshly
+ * fetched capture, so an absolute viewportY captured beforehand means nothing
+ * afterwards: the line it pointed at may not even exist. Distance from the
+ * BOTTOM is the anchor that survives a rewrite, so a reader stays roughly
+ * where they were reading.
+ *
+ * Returns null when the user was following live output, which the caller reads
+ * as "scroll to bottom" — the historical behavior, kept for that case.
+ *
+ * @param {{linesFromBottom?: number, baseY?: number}} input
+ * @returns {number|null}
+ */
+function computeRewriteScrollLine(input) {
+  const linesFromBottom = input?.linesFromBottom || 0;
+  if (!(linesFromBottom > 0)) return null;
+  return Math.max(0, (input?.baseY || 0) - linesFromBottom);
+}
+
+/**
+ * Absolute file paths in agent output, as ONE pattern with two consumers: the
+ * xterm link provider (terminal-ui.js) and the response viewer's markdown
+ * linkifier (app.js). They used to be able to drift, and a path that is
+ * clickable in the terminal but inert in the chat reads as a bug, not a policy.
+ *
+ * Anchored on a known absolute root (so an ordinary fraction or a date can
+ * never match) and terminated by a known extension (so the end of the path is
+ * unambiguous — a trailing `)` or `.` after the extension stays out). Longer
+ * extensions come first in each family (`tsx|ts`), so the trailing `\b` cannot
+ * be satisfied by the shorter branch mid-word. `/etc` is deliberately NOT a
+ * root: DEFAULT_BLOCKED_TREES (config/attachment-guard.ts) refuses the whole
+ * tree server-side, so every `/etc/...` link was a guaranteed 403 — a link
+ * that renders clickable and then dies is worse than plain text.
+ *
+ * ⚠ Consumers must never share one instance: `lastIndex` is per-object state on
+ * a `/g` regex, so {@link absoluteFilePathPattern} mints a fresh one per call.
+ */
+const FILE_PATH_LINK_PATTERN =
+  /(\/(?:home|Users|tmp|var|private|opt|mnt|srv|media|data|workspace)\/[^\s"'<>|;&\n\x00-\x1f]*\.(?:log|txt|json|md|ya?ml|csv|xml|sh|py|tsx|ts|jsx|js|mjs|cjs|css|html|toml|ini|sql|png|jpe?g|gif|webp|bmp|svg|pdf|docx|pptx|mp4|webm|mov|mp3|wav))\b/g;
+
+/** A fresh, zero-state instance of {@link FILE_PATH_LINK_PATTERN}. */
+function absoluteFilePathPattern() {
+  return new RegExp(FILE_PATH_LINK_PATTERN.source, 'g');
+}
+
+/**
+ * Extensions the file-preview overlay renders itself. Everything else a link
+ * points at goes to the tail/log viewer, which is the right home for a growing
+ * text file and the wrong one for bytes (tailing a PNG shows binary noise).
+ *
+ * The media entries mirror VIDEO_ATTACHMENT_EXTENSIONS/AUDIO_ATTACHMENT_EXTENSIONS
+ * (src/attachment-registry.ts, the single source) — they diverged once and an
+ * in-workspace `.m4a` opened as binary noise in the log viewer while the same
+ * file in /tmp played fine. test/media-extension-parity.test.ts pins the sync.
+ */
+const FILE_PREVIEW_EXTENSIONS = new Set(
+  ('png jpg jpeg gif webp bmp svg pdf docx pptx mp4 webm mov m4v ogv mp3 wav ogg oga m4a aac flac opus').split(' ')
+);
+
+/** Whether a path's extension is one {@link FILE_PREVIEW_EXTENSIONS} covers. */
+function previewsInFileViewer(filePath) {
+  const ext = String(filePath || '').split('.').pop().toLowerCase();
+  return FILE_PREVIEW_EXTENSIONS.has(ext);
+}
+
+if (typeof window !== 'undefined') {
+  window.CodemanHistoryFormat = { formatHistoryBytes, computeHistoryTruncationNotice, computeRewriteScrollLine };
+  window.CodemanFilePaths = { absoluteFilePathPattern, previewsInFileViewer, FILE_PREVIEW_EXTENSIONS };
 }

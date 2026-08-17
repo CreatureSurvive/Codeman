@@ -23,7 +23,7 @@
  *
  * @mixin Extends CodemanApp.prototype via Object.assign
  * @dependency subagent-windows.js (_updateConnectionLinesImmediate, #connectionLines)
- * @dependency constants.js (window.CodemanLineage.computePath)
+ * @dependency constants.js (window.CodemanLineage.computePath + .COLORS)
  * @dependency settings-ui.js (loadAppSettingsFromStorage, getDefaultSettings)
  * @loadorder 15.6 (after ultracode-windows.js — appended to the same SVG pass)
  */
@@ -91,6 +91,35 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Colour for one child's arc, from CodemanLineage.COLORS, assigned in FIRST-SEEN
+   * order and remembered per child id. First-seen rather than draw-index keeps a
+   * line's colour stable across re-renders, tab reorders and sibling closes (the
+   * SVG is wiped and rebuilt constantly, so an index-based colour would flicker).
+   * An empty string means "no override": the CSS falls back to --session-blue.
+   */
+  _lineageColorFor(childId) {
+    const palette = (window.CodemanLineage && window.CodemanLineage.COLORS) || [];
+    if (palette.length === 0) return '';
+    if (!this._lineageColorByChild) {
+      this._lineageColorByChild = new Map();
+      this._lineageColorNext = 0;
+    }
+    let idx = this._lineageColorByChild.get(childId);
+    if (idx === undefined) {
+      idx = this._lineageColorNext++ % palette.length;
+      this._lineageColorByChild.set(childId, idx);
+      // Bounded: entries for long-gone sessions are pruned once the map is clearly
+      // stale, so a day-long dashboard cannot grow it without limit.
+      if (this._lineageColorByChild.size > 200 && this.sessions) {
+        for (const key of this._lineageColorByChild.keys()) {
+          if (!this.sessions.has(key)) this._lineageColorByChild.delete(key);
+        }
+      }
+    }
+    return palette[idx] || '';
+  },
+
+  /**
    * Append the lineage layer to the shared SVG pass.
    *
    * Contract with the caller: `rects` is the batched read cache keyed `tab:<id>`, and
@@ -101,6 +130,14 @@ Object.assign(CodemanApp.prototype, {
   _appendLineageConnectionLines(svg, rects) {
     this._lineageEdgeCount = 0;
     if (!svg || !this._lineageLinesEnabled()) return;
+    // Sidebar layout: computeLineagePath()'s whole geometry — the U-bridge hung
+    // from the STRIP's bottom edge, the 64px dip corridor — assumes a horizontal
+    // tab row. Against a vertical list the "strip bottom" is the bottom of the
+    // sidebar, so every arc would draw a giant loop to the foot of the list.
+    // Parent/child adjacency reads fine in a vertical list without arcs; a
+    // sideways lineage shape is a follow-up with its own visual tuning, not a
+    // by-product of a layout port.
+    if (this.isSessionSidebarActive?.()) return;
     const compute = window.CodemanLineage && window.CodemanLineage.computePath;
     if (!compute) return;
 
@@ -137,6 +174,10 @@ Object.assign(CodemanApp.prototype, {
       // the line itself. `status` is the CHILD's, which is the interesting end.
       const working = edge.status === 'working' ? ' lineage-line--working' : '';
       line.setAttribute('class', 'connection-line lineage-line' + working);
+      // Per-child colour rides a CSS custom property so the stylesheet keeps owning
+      // opacity, glow and dash; an empty colour leaves the --session-blue fallback.
+      const color = this._lineageColorFor(edge.childId);
+      if (color) line.style.setProperty('--lineage-color', color);
       // `data-agent-id` is what _applyLineEntrances() queries — see the file header.
       line.setAttribute('data-agent-id', 'lineage:' + edge.childId);
       line.setAttribute('data-parent-tab', edge.parentId);
@@ -148,9 +189,12 @@ Object.assign(CodemanApp.prototype, {
       const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       dot.setAttribute('cx', String(geom.endX));
       dot.setAttribute('cy', String(geom.endY));
-      dot.setAttribute('r', '3');
+      // Resting radius; `lineage-dot-pulse` breathes it 3.5 → 4.5 while the child
+      // works, so the two have to be changed together.
+      dot.setAttribute('r', '3.5');
       dot.setAttribute('class', 'lineage-line-dot' + working);
       dot.setAttribute('data-child-tab', edge.childId);
+      if (color) dot.style.setProperty('--lineage-color', color);
       svg.appendChild(dot);
     }
   },
@@ -167,7 +211,10 @@ Object.assign(CodemanApp.prototype, {
     const strip = document.getElementById('sessionTabs');
     if (!strip) return;
     this._lineageScrollHandler = () => {
-      if (this._lineageEdgeCount > 0) this.updateConnectionLines();
+      // Sidebar layout scrolls the SAME element vertically, and there the
+      // subagent/ultracode connectors anchor to tab rects too (lineage arcs are
+      // skipped, so _lineageEdgeCount alone would never redraw them).
+      if (this._lineageEdgeCount > 0 || this.isSessionSidebarActive?.()) this.updateConnectionLines();
     };
     strip.addEventListener('scroll', this._lineageScrollHandler, { passive: true });
   },

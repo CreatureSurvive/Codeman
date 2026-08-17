@@ -37,13 +37,26 @@ Object.assign(CodemanApp.prototype, {
   async seedApprovals() {
     if (!this.approvals) this.approvals = new Map();
     this.approvals.clear();
-    if (this.approvalsInboxEnabled()) {
-      const data = await this._apiJson('/api/approvals');
-      for (const item of (data && data.approvals) || []) {
-        this.approvals.set(item.id, item);
-        // Re-arm the tab alert state machine (idempotent set-add).
-        this.setPendingHook(item.sessionId, approvalKindToHook(item.kind));
-      }
+    // ⚠ Fetch and re-arm the tab-alert state machine REGARDLESS of the inbox
+    // setting. The server-side approval store runs unconditionally (only the
+    // inbox SURFACES are opt-in), and the red/yellow tab alert predates the
+    // inbox: gating the seed on the setting meant that with the inbox off, a
+    // reload landed with every alert store empty while a permission dialog sat
+    // blocking a session (owner report 2026-08-15: rail said NEEDS YOU from
+    // the live SSE event, the reloaded-elsewhere tab showed a plain green
+    // dot). Only populating `this.approvals` (bell/drawer/answer strips) stays
+    // behind the setting.
+    const data = await this._apiJson('/api/approvals');
+    const inboxOn = this.approvalsInboxEnabled();
+    for (const item of (data && data.approvals) || []) {
+      if (inboxOn) this.approvals.set(item.id, item);
+      // ⚠ Skip items a human already looked at (`acknowledgedAt`, set by
+      // markIdleAlertSeen → POST .../viewed). Re-arming those is exactly the
+      // bug this flag exists for: clicking a yellow tab cleared the alert in
+      // this tab's memory only, so the next reload seeded it right back.
+      if (item.acknowledgedAt) continue;
+      // Re-arm the tab alert state machine (idempotent set-add).
+      this.setPendingHook(item.sessionId, approvalKindToHook(item.kind));
     }
     this.renderApprovals();
   },
@@ -62,23 +75,48 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _onApprovalUpdated(item) {
-    if (!item || !item.id || !this.approvals?.has(item.id)) return;
+    if (!item || !item.id) return;
+    // Acknowledged elsewhere (this user opened the session on another device):
+    // spend the tab alert UNCONDITIONALLY, for the same reason
+    // _onApprovalResolved does: with the inbox setting OFF the item was never
+    // stored in `this.approvals`, yet seedApprovals armed its alert, so gating
+    // this on a map hit would strand a yellow tab on every other device.
+    if (item.acknowledgedAt) this.clearPendingHooks(item.sessionId, approvalKindToHook(item.kind));
+    if (!this.approvals?.has(item.id)) return;
     this.approvals.set(item.id, item);
     this.renderApprovals();
   },
 
   _onApprovalResolved(info) {
-    if (!info || !info.id || !this.approvals) return;
-    if (this.approvals.delete(info.id)) {
-      // Clear the matching tab alert: the inbox resolves on more signals than
-      // the hook handlers do (superseded, expired, answered from another
-      // device), and clearPendingHooks is a no-op when nothing is set.
-      this.clearPendingHooks(info.sessionId, approvalKindToHook(info.kind));
-      this.renderApprovals();
-    }
+    if (!info || !info.id) return;
+    // Clear the matching tab alert UNCONDITIONALLY: the inbox resolves on more
+    // signals than the hook handlers do (superseded, expired, answered from
+    // another device), clearPendingHooks is a no-op when nothing is set, and
+    // with the inbox setting OFF the item was never stored in `this.approvals`
+    // even though seedApprovals armed the alert — gating the clear on a map hit
+    // would strand that alert forever.
+    this.clearPendingHooks(info.sessionId, approvalKindToHook(info.kind));
+    if (this.approvals?.delete(info.id)) this.renderApprovals();
   },
 
   // ─── Actions ─────────────────────────────────────────────────
+
+  /**
+   * Tell the server the session's pending IDLE prompt has been looked at, so
+   * the yellow tab alert stays gone: `seedApprovals()` skips acknowledged
+   * items on the next reload, and the resulting `approval:updated` broadcast
+   * clears the alert on the user's other devices. Called by markIdleAlertSeen
+   * (app.js), which owns the local half of the clear.
+   *
+   * Fire-and-forget: the alert is already down locally, `_apiJson` swallows
+   * failures, and the worst case of a lost POST is today's behavior (yellow
+   * returns after a reload). Runs regardless of `approvalsInboxEnabled`,
+   * since the tab alert predates the inbox and is not gated on it.
+   */
+  acknowledgeIdleApprovalOnView(sessionId) {
+    if (!sessionId) return;
+    this._apiJson(`/api/approvals/session/${encodeURIComponent(sessionId)}/viewed`, { method: 'POST' });
+  },
 
   async answerApproval(id, action, option) {
     const body = option !== undefined ? { action, option } : { action };

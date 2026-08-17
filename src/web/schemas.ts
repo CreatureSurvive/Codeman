@@ -132,6 +132,7 @@ const ALLOWED_ENV_PREFIXES = [
   'OPENCODE_',
   'OPENCLAW_',
   'ANTIGRAVITY_',
+  'PI_',
 ];
 
 /**
@@ -171,7 +172,7 @@ const safeEnvOverridesSchema = z
     },
     {
       message:
-        'envOverrides contains blocked or disallowed env var keys. Only ANTHROPIC_*, CLAUDE_CODE_*, CODEX_*, GEMINI_*, GOOGLE_*, OPENAI_*, OPENCODE_*, OPENCLAW_*, ANTIGRAVITY_*, API_TIMEOUT_MS, and CLAUDE_CONFIG_DIR are allowed.',
+        'envOverrides contains blocked or disallowed env var keys. Only ANTHROPIC_*, CLAUDE_CODE_*, CODEX_*, GEMINI_*, GOOGLE_*, OPENAI_*, OPENCODE_*, OPENCLAW_*, ANTIGRAVITY_*, PI_*, API_TIMEOUT_MS, and CLAUDE_CONFIG_DIR are allowed.',
     }
   );
 
@@ -280,6 +281,37 @@ const AntigravityConfigSchema = z
   .optional();
 
 /**
+ * Schema for Pi CLI (pi.dev)-specific configuration.
+ *
+ * No bypass field exists on purpose: pi has no permission prompts. The one
+ * privilege-shaped knob is the TRI-STATE `approveProjectTrust` (see PiConfig),
+ * which the multi-user clamp MATERIALIZES to `false` for non-granted owners.
+ */
+const PiConfigSchema = z
+  .object({
+    // `:` for a thinking suffix (`sonnet:high`), `/` for `provider/id`.
+    model: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9._\-/:]+$/)
+      .optional(),
+    provider: z
+      .string()
+      .max(50)
+      .regex(/^[a-z0-9-]+$/)
+      .optional(),
+    thinking: z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    continueSession: z.boolean().optional(),
+    resumeSessionId: z
+      .string()
+      .max(100)
+      .regex(/^[a-zA-Z0-9._-]+$/)
+      .optional(),
+    approveProjectTrust: z.boolean().optional(),
+  })
+  .optional();
+
+/**
  * The session that spawned the one being created — pure UI decoration, drawn as a
  * lineage line between the two tabs. Accepted here and, equivalently, as the
  * `X-Codeman-Parent-Session` header (the agent skill sets that once on its shared
@@ -292,7 +324,7 @@ const parentSessionIdSchema = z.string().max(100).optional();
 
 export const CreateSessionSchema = z.object({
   workingDir: safePathSchema.optional(),
-  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity']).optional(),
+  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi']).optional(),
   name: z.string().max(100).optional(),
   /** Session that spawned this one — see parentSessionIdSchema. */
   parentSessionId: parentSessionIdSchema,
@@ -307,6 +339,7 @@ export const CreateSessionSchema = z.object({
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
   antigravityConfig: AntigravityConfigSchema,
+  piConfig: PiConfigSchema,
   /** Resume a previous Claude conversation by its session ID (used for reboot recovery) */
   resumeSessionId: z
     .string()
@@ -441,6 +474,7 @@ const RemoteCommandOverridesSchema = z
     codex: z.string().min(1).max(300).optional(),
     gemini: z.string().min(1).max(300).optional(),
     antigravity: z.string().min(1).max(300).optional(),
+    pi: z.string().min(1).max(300).optional(),
   })
   .strict()
   .optional();
@@ -718,12 +752,13 @@ export const QuickStartSchema = z.object({
    *  a real host dir, so the settings file crosses the bind mount); rejected for
    *  remote cases (the file would be written on the WRONG machine). */
   modelOverride: z.string().max(50).optional(),
-  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity']).optional(),
+  mode: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi']).optional(),
   launchCommand: z.string().max(2000).refine(noNewlines, 'launchCommand must be a single line').optional(),
   openCodeConfig: OpenCodeConfigSchema,
   codexConfig: CodexConfigSchema,
   geminiConfig: GeminiConfigSchema,
   antigravityConfig: AntigravityConfigSchema,
+  piConfig: PiConfigSchema,
   envOverrides: safeEnvOverridesSchema,
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort: effortLevelSchema,
@@ -887,6 +922,17 @@ export const SettingsUpdateSchema = z
      */
     agentSkillEnabled: z.boolean().optional(),
     /**
+     * Install Codeman's hooks block into the workspace of every Claude session,
+     * not only into cases Codeman scaffolded itself. SYNCED, default ON: without
+     * it a linked case or an existing repo runs with no hooks at all, and each
+     * hook-driven surface is silently dead there (tab alert, Approvals Inbox,
+     * push, respawn's definitive idle signals, the wait endpoints' stop/blocked).
+     * Turning it OFF restores the older, narrower behavior — a Codeman hooks
+     * block that is already present is still refreshed when stale, but one is
+     * never added — for a user who wants Codeman to leave their repos alone.
+     */
+    workspaceHooksEnabled: z.boolean().optional(),
+    /**
      * Let browser dictation transcribe through this machine's Claude Code login,
      * the same speech-to-text service the CLI's own `/voice` mode uses
      * (docs/claude-voice-plan.md). SYNCED, default OFF: enabling it spends the
@@ -925,6 +971,8 @@ export const SettingsUpdateSchema = z
     // CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK env var. Stripped before persisting.
     acknowledgeUnauthTunnel: z.boolean().optional(),
     tabTwoRows: z.boolean().optional(),
+    /** Session list layout: 'header' = horizontal tab strip, 'sidebar' = collapsible left sidebar. Display key (per-device). */
+    sessionListLayout: z.enum(['header', 'sidebar']).optional(),
     agentTeamsEnabled: z.boolean().optional(),
     /** Model for new Claude sessions (e.g. "claude-fable-5[1m]", "opus[1m]"); takes precedence over opusContext1mEnabled */
     claudeModel: z.string().max(50).optional(),
@@ -1244,7 +1292,7 @@ const hhmmSchema = z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/, 'Time must be 
 /** Shared field shape for creating/updating a scheduled job. */
 const CronJobBaseSchema = z.object({
   name: z.string().min(1).max(200),
-  agentType: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity']),
+  agentType: z.enum(['claude', 'shell', 'opencode', 'codex', 'gemini', 'antigravity', 'pi']),
   workingDir: safePathSchema,
   launchCommand: z.string().max(2000).refine(noNewlines, 'launchCommand must be a single line').optional(),
   promptMode: z.enum(['inline_text', 'prompt_file_path']),

@@ -237,7 +237,7 @@ minutes, never retry the credential.
 flushed slightly *after* the `stop` hook fires, so a read taken the instant the wait
 returns is too early (verified live: empty on the first call, full prose seconds later).
 It is also `""` before the worker's first completed turn, and permanently `""` for
-`shell`, `opencode`, `gemini` and `antigravity`, which write no transcript.
+`shell`, `opencode`, `gemini`, `antigravity` and `pi`, which write no Claude transcript.
 
 **Fix** Poll it, bounded (10 tries, 1 s apart). If it is still empty on a hook-less mode,
 that is expected, not a failure: read `terminal?tail=` and strip ANSI instead.
@@ -251,10 +251,12 @@ that is expected, not a failure: read `terminal?tail=` and strip ANSI instead.
 **It means** that session has no Codeman hooks, so `stop` can never fire and the wait
 silently degraded to `idle`, which flaps mid-turn. Nothing rejected your request:
 `wait:true` (and even an explicit `until=stop`) is accepted because the 400 is about
-session **mode**, and the mode really is `claude`. Hooks are written only when Codeman
-**creates** the directory; a linked case or a raw `workingDir` gets none (an existing
-case that Codeman created earlier keeps the block it was given), see the table under
-[Signals by mode](#signals-by-mode). Measured: on a
+session **mode**, and the mode really is `claude`. Hooks are installed into every
+claude workspace at session create (synced `workspaceHooksEnabled`, default ON) and
+swept across recovered sessions at boot, so a linked case or a raw `workingDir` gets
+them too; with the setting off, on a remote session, or on a session from an older
+server, they are absent, see the table under
+[Signals by mode](#signals-by-mode). Measured before that changed: on a
 linked case whose `.claude/settings.local.json` carries env/model/permissions/statusLine
 and no `hooks` block, a `wait?until=stop,exit` parked for twelve consecutive 60 s rounds
 never resolved although the worker finished its turn.
@@ -334,9 +336,19 @@ ESC=$(printf '\033')
 
 `POST /api/v1/quick-start` body (all optional):
 `{"caseName":"worker-1","mode":"claude","sessionName":"w9-worker","effort":"high"}`
-,  `mode` ∈ `claude|shell|opencode|codex|gemini|antigravity`; response is
+,  `mode` ∈ `claude|shell|opencode|codex|gemini|antigravity|pi`; response is
 `.data.{sessionId, caseName, casePath}`. Creates the case directory (a real directory
 on the user's disk) if missing, do not retry it in a loop, and remember the name.
+
+⚠️ A `mode` whose CLI is **not installed on the server** fails the spawn with
+`OPERATION_FAILED`; it never falls back to claude. Probe first whenever you did not pick
+the mode yourself: `GET /api/v1/claude/status`, `GET /api/v1/opencode/status`,
+`GET /api/v1/codex/status`, `GET /api/v1/gemini/status`, `GET /api/v1/antigravity/status`
+and `GET /api/v1/pi/status` each return `.data.{available, path}` (no session needed).
+Pi's also carries `.data.version`, because `pi` is a short generic name that an unrelated
+binary on `$PATH` can shadow: the resolver rejects one whose `--version` is not
+semver-shaped, so `available:false` there can mean "a different `pi` is in front" rather
+than "nothing is installed". `shell` has no CLI to probe.
 
 ⚠️ **Branch on `.success` before reading `.data.sessionId`.** On any failure the field
 is absent, `jq -r` prints the literal string `null`, and every later call then targets
@@ -350,10 +362,10 @@ loop.
 ⚠️ `caseName` resolves through the linked-cases registry first, so a name that happens
 to match a case the user linked in lands in that **real repo**, not a fresh scratch
 directory. Pick distinctive scratch names, and use a linked name deliberately when you
-do want a worker in an existing checkout. ⚠️ It also decides whether you get hooks:
-Codeman writes them only when it **creates** the directory, so a linked case or a raw
-path gives you a worker with no `stop` signal, while a scratch case Codeman created
-earlier keeps working signals ([Signals by mode](#signals-by-mode)).
+do want a worker in an existing checkout. It no longer decides whether you get hooks:
+every claude create path installs them, so a linked case and a raw path both get a
+`stop` signal unless the operator turned `workspaceHooksEnabled` off
+([Signals by mode](#signals-by-mode)).
 
 **The two-step alternative, `POST /api/v1/sessions`.** Use it when you need a session in
 a directory that is not a case (body takes `workingDir`, `mode`, `name`, `effort`,
@@ -450,9 +462,9 @@ Quirks that will bite you:
   session answers with an empty timeline rather than a 404.
 - ⚠️ **`active-tools` proves presence, never absence.** It is fed by the BashToolParser,
   which reads Claude's rendered `● Bash(…)` lines, and `_processExpensiveParsers`
-  returns early for every external CLI mode (`session.ts:2086`), so it is permanently
-  `[]` on `opencode`/`codex`/`gemini`/`antigravity`. ⚠️ **`shell` is NOT one of those**
-  (`isExternalCliMode`, `session.ts:164-166`, lists only those four), so the parser does
+  returns early for every external CLI mode (`session.ts:2136`), so it is permanently
+  `[]` on `opencode`/`codex`/`gemini`/`antigravity`/`pi`. ⚠️ **`shell` is NOT one of those**
+  (`isExternalCliMode`, `session.ts:165-167`, lists only those five), so the parser does
   run on a shell worker, and `TEXT_COMMAND_PATTERN` (`bash-tool-parser.ts:88`) matches
   bare `tail|cat|head|less|grep|watch|multitail <path>` lines with no `● Bash(` wrapper:
   a shell worker running `cat build.log` really does populate this. In practice it stays
@@ -604,35 +616,27 @@ Three bounded long-polls. Shared semantics:
 | `exit` | PTY exited or session deleted | every mode |
 
 ⚠️ **`claude` mode is necessary for `stop`/`blocked`, not sufficient. The real
-precondition is that the session's working directory has a Codeman hooks block**, and
-whether it does depends on who created the directory:
+precondition is that the session's working directory has a Codeman hooks block**, which
+is now installed by default rather than depending on who created the directory:
 
 | The worker's directory | Hooks | `stop` / `blocked` | Synchronize with |
 |------------------------|-------|--------------------|------------------|
-| Codeman created it (`quick-start` with a NEW `caseName`, `POST /api/cases`, clone, docker quickcreate) | written at create | fire | send-and-wait on `stop` |
-| Codeman never created it (a linked case pointing at your own checkout, a raw `workingDir`) | none written | never fire | `wait-output` markers only |
+| any claude workspace, with `workspaceHooksEnabled` ON (the default) | installed at session create, add-only merge | fire | send-and-wait on `stop` |
+| the same, with the setting OFF and no block already on disk | none added | never fire | `wait-output` markers only |
+| a remote SSH session, a docker case that opted out, a workspace Codeman cannot write | none | never fire | `wait-output` markers only |
+| a session created by a pre-1.19.0 server and never restarted since | whatever it had | only if present | check, then choose |
 
-⚠️ **Docker cases are the one exception.** For a docker case, quick-start writes hooks
-whenever `.claude/settings.local.json` is *missing* (`session-routes.ts:2836-2845`:
-absent means write, present means refresh), regardless of who created that host
-directory. There the discriminator really is "does the settings file exist". No
-downstream advice changes, since docker quickcreate is already on the create side.
+The install is an add-only merge, so a user's own hook entries survive and a malformed
+settings file is left untouched. Sessions recovered at server boot get the same sweep,
+which is what heals sessions created before this behavior existed. When in doubt, test
+it rather than reason about it: grep for `/api/hook-event` in
+`<casePath>/.claude/settings.local.json`.
 
-⚠️ For every non-docker case the discriminator is **who created the directory, not
-whether it exists now**. A
-scratch case Codeman created last week still has its hooks block on disk, so
-`quick-start` against that existing name gets working `stop` signals. Only a directory
-Codeman never created lacks them. When in doubt, test it rather than reason about it:
-grep for `/api/hook-event` in `<casePath>/.claude/settings.local.json`.
-
-`writeHooksConfig()` runs only on the create paths (`case-routes.ts:341`, `:520`,
-`:869`, `ralph-routes.ts:318`, `session-routes.ts:2799` inside
-`if (!existsSync(resolvedCasePath))`, `:2841` for docker). Quick-start against a
-directory that already exists takes the else-if branch and calls
-`refreshStaleCodemanHooks()`, which returns immediately when there is no
-`settings.local.json` and again when the hooks it finds are not ours
-(`hooks-config.ts:706-731`); it never *adds* a hooks block. `POST /api/cases/link` is
-not on that list at all: it only records a name-to-path entry. See
+Before 1.19.0, `writeHooksConfig()` ran only on the create paths and `quick-start`
+against an existing directory called `refreshStaleCodemanHooks()`, which never *adds* a
+block, so a linked case or a raw `workingDir` had no hooks at all. `POST
+/api/cases/link` still only records a name-to-path entry; what changed is that the
+session-create path installs hooks regardless of how the directory got there. See
 [symptom 8](#8-send-and-wait-resolves-instantly-with-signalidle-and-the-answer-is-last-turns).
 
 Default `until` set: `stop,idle,exit`. On non-claude modes the server silently drops
@@ -656,7 +660,7 @@ whose turn already ended just times out, with or without `fresh`, verified live)
 Register the waiter before the event can happen: send-and-wait does exactly that,
 and `wait-output` markers with `from=buffer` are latched by construction. Never
 fire-and-forget N prompts and then gather signal-waits worker by worker; every
-worker that finishes before its gather is unobservable (see recipes.md Flow 3b).
+worker that finishes before its gather is unobservable (see recipes.md Flow 4).
 
 #### `GET /api/v1/sessions/:id/wait`
 

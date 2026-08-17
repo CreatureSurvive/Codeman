@@ -23,12 +23,15 @@ import type {
 import { ApiErrorCode, createErrorResponse, getErrorMessage } from '../../types.js';
 import { fileStreamManager } from '../../file-stream-manager.js';
 import {
+  AUDIO_ATTACHMENT_EXTENSIONS,
   AttachmentRegistrationError,
   attachmentRecordToEvent,
   attachmentRegistry,
   buildFileThumbnailRoute,
   isSupportedAttachmentExtension,
   registerExternalAttachment,
+  TEXT_ATTACHMENT_EXTENSIONS,
+  VIDEO_ATTACHMENT_EXTENSIONS,
   type AttachmentRecord,
 } from '../../attachment-registry.js';
 import { generateFirstPageThumbnail } from '../../document-thumbnailer.js';
@@ -46,6 +49,7 @@ import {
 } from '../route-helpers.js';
 import type { FastifyRequest } from 'fastify';
 import type { SessionAttachmentHistoryItem, SessionState } from '../../types/session.js';
+import { parseByteRange } from '../http-range.js';
 import { isSensitivePath } from '../sensitive-path.js';
 import { SseEvent } from '../sse-events.js';
 import type { ConfigPort, EventPort, SessionPort } from '../ports/index.js';
@@ -66,6 +70,22 @@ const MIME_TYPES: Record<string, string> = {
   webp: 'image/webp',
   ico: 'image/x-icon',
   bmp: 'image/bmp',
+  // Media needs a real type, not the octet-stream fallback: a <video>/<audio>
+  // element refuses to decode an unknown type, so a missing entry here presents
+  // as a player that renders and then does nothing.
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+  m4v: 'video/x-m4v',
+  ogv: 'video/ogg',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  oga: 'audio/ogg',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  flac: 'audio/flac',
+  opus: 'audio/opus',
   pdf: 'application/pdf',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -86,7 +106,13 @@ function buildContentDisposition(disposition: 'inline' | 'attachment', fileName:
 
 function sendRawStream(reply: FastifyReply, content: ReadStream): void {
   const headers = reply.getHeaders();
+  // hijack() answers on reply.raw, which keeps Fastify's own status handling out
+  // of the picture — so a 206 set with reply.code() has to be carried across by
+  // hand or a partial body would go out labelled 200 and the browser would treat
+  // it as the whole file.
+  const statusCode = reply.statusCode;
   reply.hijack();
+  reply.raw.statusCode = statusCode;
 
   for (const [name, value] of Object.entries(headers)) {
     if (value !== undefined) {
@@ -106,12 +132,54 @@ function sendRawStream(reply: FastifyReply, content: ReadStream): void {
   content.pipe(reply.raw);
 }
 
+/**
+ * Stream a file body, honoring a `Range` request header.
+ *
+ * Callers set Content-Type/Content-Disposition first; this adds the
+ * range-related headers and the body. Range support is what makes the file
+ * viewer's `<video>`/`<audio>` seekable: with a plain 200 and no
+ * `Accept-Ranges`, Chrome reports `video.seekable` as `[0, 0]`, the scrub bar
+ * does nothing and `currentTime = x` is silently reverted (measured against an
+ * 18MB mp4 before this existed). It also stops each seek from re-reading the
+ * whole file into memory.
+ */
+function sendFileBody(
+  reply: FastifyReply,
+  resolvedPath: string,
+  size: number,
+  rangeHeader: string | string[] | undefined
+): void {
+  reply.header('Accept-Ranges', 'bytes');
+  const range = parseByteRange(rangeHeader, size);
+
+  if (range.kind === 'unsatisfiable') {
+    reply
+      .code(416)
+      .header('Content-Range', `bytes */${size}`)
+      .type('application/json; charset=utf-8')
+      .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Requested range not satisfiable'));
+    return;
+  }
+
+  if (range.kind === 'partial') {
+    reply.code(206);
+    reply.header('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
+    reply.header('Content-Length', range.end - range.start + 1);
+    sendRawStream(reply, createReadStream(resolvedPath, { start: range.start, end: range.end }));
+    return;
+  }
+
+  reply.header('Content-Length', size);
+  sendRawStream(reply, createReadStream(resolvedPath));
+}
+
 async function serveRawFile(
   reply: FastifyReply,
   resolvedPath: string,
   fileName: string,
   extension: string,
-  download?: boolean
+  download?: boolean,
+  rangeHeader?: string | string[]
 ): Promise<void> {
   const stat = await fs.stat(resolvedPath);
   const MAX_RAW_ATTACHMENT_SIZE = 50 * 1024 * 1024; // 50MB, matching file-raw / download
@@ -126,24 +194,38 @@ async function serveRawFile(
       );
     return;
   }
-  const content = createReadStream(resolvedPath);
-  if (download || extension === 'svg') {
+  // Markup is download-only: served with a renderable type on our own origin it
+  // would be stored XSS. SVG was always here; HTML/HTM join it now that the text
+  // family is servable, so widening what can be READ never widened what can RUN.
+  // The preview overlay reads these through `fetch()`, which ignores the
+  // disposition, so a clicked .html still shows its source.
+  const markupOnly = extension === 'svg' || extension === 'html' || extension === 'htm';
+  if (download || markupOnly) {
     reply.header(
       'Content-Type',
-      extension === 'svg' ? 'application/octet-stream' : MIME_TYPES[extension] || 'application/octet-stream'
+      markupOnly ? 'application/octet-stream' : MIME_TYPES[extension] || 'application/octet-stream'
     );
     reply.header('Content-Disposition', buildContentDisposition('attachment', fileName));
-    reply.header('Content-Length', stat.size);
     reply.header('X-Content-Type-Options', 'nosniff');
-    sendRawStream(reply, content);
+    sendFileBody(reply, resolvedPath, stat.size, rangeHeader);
+    return;
+  }
+
+  // Plain text with no dedicated MIME entry (code, config, logs, csv, xml) goes
+  // out as inert text/plain rather than the octet-stream fallback, matching what
+  // the path picker already does. Never a type the browser would execute.
+  if (!MIME_TYPES[extension] && TEXT_ATTACHMENT_EXTENSIONS.has(extension)) {
+    reply.header('Content-Type', 'text/plain; charset=utf-8');
+    reply.header('Content-Disposition', buildContentDisposition('inline', fileName));
+    reply.header('X-Content-Type-Options', 'nosniff');
+    sendFileBody(reply, resolvedPath, stat.size, rangeHeader);
     return;
   }
 
   reply.header('Content-Type', MIME_TYPES[extension] || 'application/octet-stream');
   reply.header('Content-Disposition', buildContentDisposition('inline', fileName));
-  reply.header('Content-Length', stat.size);
   reply.header('X-Content-Type-Options', 'nosniff');
-  sendRawStream(reply, content);
+  sendFileBody(reply, resolvedPath, stat.size, rangeHeader);
 }
 
 function getAttachmentOr404(
@@ -851,7 +933,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       await serveConvertedPreview(reply, resolvedPath, fileName, extension);
       return;
     }
-    await serveRawFile(reply, resolvedPath, fileName, extension);
+    await serveRawFile(reply, resolvedPath, fileName, extension, false, req.headers.range);
   });
 
   // File tree listing
@@ -1055,8 +1137,10 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       // so the file viewer can open the same files.
       const ext = filePath.split('.').pop()?.toLowerCase() || '';
       const imageExts = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']);
-      const videoExts = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv']);
-      const audioExts = new Set(['mp3', 'wav', 'ogg', 'oga', 'm4a', 'aac', 'flac', 'opus']);
+      // Shared with the attachment registry so a video plays the same whether it
+      // sits in the workspace or is reached by id from outside it.
+      const videoExts = VIDEO_ATTACHMENT_EXTENSIONS;
+      const audioExts = AUDIO_ATTACHMENT_EXTENSIONS;
       const otherBinaryExts = new Set([
         'pdf',
         'zip',
@@ -1371,24 +1455,24 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
         json: 'application/json',
       };
 
-      const content = await fs.readFile(resolvedPath);
       const rawBasename = filePath!.split('/').pop() || 'download';
       // Sanitize filename for Content-Disposition header (prevent header injection)
       const basename = rawBasename.replace(/["\\\r\n]/g, '_');
       if (download === 'true' || ext === 'svg') {
-        reply.raw.writeHead(200, {
-          ...inheritedHeaders(reply),
-          'Content-Type': ext === 'svg' ? 'application/octet-stream' : mimeTypes[ext] || 'application/octet-stream',
-          'Content-Disposition': `attachment; filename="${basename}"`,
-          'Content-Length': content.length,
-          'X-Content-Type-Options': 'nosniff',
-        });
-        reply.raw.end(content);
+        reply.header(
+          'Content-Type',
+          ext === 'svg' ? 'application/octet-stream' : mimeTypes[ext] || 'application/octet-stream'
+        );
+        reply.header('Content-Disposition', `attachment; filename="${basename}"`);
+        reply.header('X-Content-Type-Options', 'nosniff');
+        sendFileBody(reply, resolvedPath, stat.size, req.headers.range);
         return;
       }
       reply.header('Content-Type', mimeTypes[ext] || 'application/octet-stream');
       reply.header('X-Content-Type-Options', 'nosniff');
-      reply.send(content);
+      // Streamed, range-aware: this is the <video>/<audio> source the file
+      // viewer points at, and a 200-only response makes the media unseekable.
+      sendFileBody(reply, resolvedPath, stat.size, req.headers.range);
     } catch (err) {
       reply
         .code(500)
@@ -1405,7 +1489,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
   app.post('/api/sessions/:id/attachments', async (req, reply) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id, req);
-    const body = (req.body || {}) as { path?: string };
+    const body = (req.body || {}) as { path?: string; notify?: boolean };
 
     if (!body.path || typeof body.path !== 'string') {
       reply.code(400).send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Missing attachment path'));
@@ -1414,7 +1498,15 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
 
     try {
       const event = await registerExternalAttachment(id, body.path, { sessionWorkingDir: session.workingDir });
-      ctx.broadcast(SseEvent.AttachmentDetected, event);
+      // `notify: false` registers QUIETLY. The file-preview overlay uses it to
+      // mint an id for a path the user just clicked (a terminal or response-viewer
+      // link pointing outside the workspace): it is already opening the file, so
+      // the attachment card + unread badge would be noise announcing what is
+      // filling the screen. Default stays true — every other caller (the
+      // `codeman attach` CLI, codeman-publish) wants the card.
+      if (body.notify !== false) {
+        ctx.broadcast(SseEvent.AttachmentDetected, event);
+      }
       return { success: true, data: event };
     } catch (err) {
       if (err instanceof AttachmentRegistrationError) {
@@ -1505,7 +1597,7 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     if (!servePath) return;
 
     try {
-      await serveRawFile(reply, servePath, record.fileName, record.extension, download === 'true');
+      await serveRawFile(reply, servePath, record.fileName, record.extension, download === 'true', req.headers.range);
     } catch (err) {
       reply
         .code(500)

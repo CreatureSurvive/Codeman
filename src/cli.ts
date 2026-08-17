@@ -959,7 +959,9 @@ webCmd.action(async (options) => {
       launch.headless ?? false
     );
     console.log(
-      chalk.green(`\n✓ ${launch.headless ? 'Headless node' : 'Web interface'} running at ${protocol}://${displayHost}:${port}`)
+      chalk.green(
+        `\n✓ ${launch.headless ? 'Headless node' : 'Web interface'} running at ${protocol}://${displayHost}:${port}`
+      )
     );
     if (https) {
       console.log(chalk.yellow('  Note: Accept the self-signed certificate in your browser on first visit'));

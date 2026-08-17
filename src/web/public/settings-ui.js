@@ -389,6 +389,8 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsExtendedKeyboardBar').checked = settings.extendedKeyboardBar ?? false;
     document.getElementById('appSettingsTabTwoRows').checked = settings.tabTwoRows ?? defaults.tabTwoRows ?? false;
     document.getElementById('appSettingsShowTabDetachButton').checked = settings.showTabDetachButton ?? defaults.showTabDetachButton ?? false;
+    document.getElementById('appSettingsSessionListLayout').value =
+      settings.sessionListLayout ?? defaults.sessionListLayout ?? 'header';
     // Claude CLI settings
     const claudeModeSelect = document.getElementById('appSettingsClaudeMode');
     const allowedToolsRow = document.getElementById('allowedToolsRow');
@@ -411,6 +413,9 @@ Object.assign(CodemanApp.prototype, {
     // Claude Permissions settings
     document.getElementById('appSettingsAgentTeams').checked = settings.agentTeamsEnabled ?? false;
     document.getElementById('appSettingsAgentSkill').checked = settings.agentSkillEnabled ?? false;
+    // Default ON: an absent key is a user who has never seen this setting, and OFF
+    // for them means no tab alerts in any workspace Codeman did not scaffold.
+    document.getElementById('appSettingsWorkspaceHooks').checked = settings.workspaceHooksEnabled !== false;
     document.getElementById('appSettingsClaudeModel').value = settings.claudeModel ?? '';
     document.getElementById('appSettingsOpusContext1m').checked = settings.opusContext1mEnabled ?? false;
     document.getElementById('appSettingsRemoteAutoReconnect').checked = settings.remoteAutoReconnect ?? true;
@@ -1209,6 +1214,7 @@ Object.assign(CodemanApp.prototype, {
       ['welcomeOpencodeBtn', 'opencode'],
       ['welcomeAntigravityBtn', 'antigravity'],
       ['welcomeGeminiBtn', 'gemini'],
+      ['welcomePiBtn', 'pi'],
       // Not a run mode, same reasoning: offering a Cloudflare Tunnel on a box
       // without cloudflared can only ever produce "cloudflared not found".
       ['welcomeTunnelBtn', 'cloudflared'],
@@ -2079,6 +2085,7 @@ Object.assign(CodemanApp.prototype, {
       extendedKeyboardBar: document.getElementById('appSettingsExtendedKeyboardBar').checked,
       tabTwoRows: document.getElementById('appSettingsTabTwoRows').checked,
       showTabDetachButton: document.getElementById('appSettingsShowTabDetachButton').checked,
+      sessionListLayout: document.getElementById('appSettingsSessionListLayout').value,
       skin: document.getElementById('appSettingsSkin').value,
       // Claude CLI settings
       claudeMode: document.getElementById('appSettingsClaudeMode').value,
@@ -2089,6 +2096,7 @@ Object.assign(CodemanApp.prototype, {
       // Claude Permissions settings
       agentTeamsEnabled: document.getElementById('appSettingsAgentTeams').checked,
       agentSkillEnabled: document.getElementById('appSettingsAgentSkill').checked,
+      workspaceHooksEnabled: document.getElementById('appSettingsWorkspaceHooks').checked,
       claudeVoiceEnabled: document.getElementById('appSettingsClaudeVoice').checked,
       claudeModel: document.getElementById('appSettingsClaudeModel').value,
       opusContext1mEnabled: document.getElementById('appSettingsOpusContext1m').checked,
@@ -2224,7 +2232,9 @@ Object.assign(CodemanApp.prototype, {
     this.applyHeaderVisibilitySettings();
     this.applySkin();
     this.applyLocalization();
-    this.applyTabWrapSettings();
+    // Re-parents #sessionTabs between header host and sidebar if the layout
+    // changed, then calls applyTabWrapSettings() itself — do not call both.
+    this.applySessionListLayout();
     this.applyLineageLineSettings?.();
     this._updateTokensImmediate();  // Re-render token display (picks up showCost change)
     this.applyMonitorVisibility();
@@ -2462,6 +2472,7 @@ Object.assign(CodemanApp.prototype, {
         imageWatcherEnabled: false,
         ralphTrackerEnabled: false,
         tabTwoRows: false,
+        sessionListLayout: 'header',
         cjkInputEnabled: false,
         terminalWheelLocalScrollback: false, // mobile scrolls via touch, not wheel
         webglRendererEnabled: false, // mobile always uses the DOM renderer
@@ -2706,19 +2717,27 @@ Object.assign(CodemanApp.prototype, {
     const settings = this.loadAppSettingsFromStorage();
     const defaults = this.getDefaultSettings();
     const deviceType = MobileDetection.getDeviceType();
+    // The left sidebar is one vertical column with its own scroller: there is no
+    // row to wrap into, and its rows are always tall (name + folder) because that
+    // is the cheapest way to tell 25 sessions apart. Header strip keeps the old
+    // rules unchanged. Kept here rather than only in applySessionListLayout() so
+    // that a stray applyTabWrapSettings() call (this one is invoked from
+    // saveAppSettings and from the resize path) cannot leave the sidebar wrapped.
+    const sidebar = this.isSessionSidebarActive?.() === true;
     // Two-row tabs disabled on mobile/tablet — not enough screen space
-    const twoRows = deviceType === 'desktop'
+    const twoRows = !sidebar && deviceType === 'desktop'
       ? (settings.tabTwoRows ?? defaults.tabTwoRows ?? false)
       : false;
+    const showFolder = sidebar || twoRows;
     const prevTallTabs = this._tallTabsEnabled;
-    this._tallTabsEnabled = twoRows;
+    this._tallTabsEnabled = showFolder;
     const tabsEl = document.getElementById('sessionTabs');
     if (tabsEl) {
       tabsEl.classList.toggle('tabs-two-rows', twoRows);
-      tabsEl.classList.toggle('tabs-show-folder', twoRows);
+      tabsEl.classList.toggle('tabs-show-folder', showFolder);
     }
     // Re-render tabs if folder visibility changed (folder spans are generated in JS)
-    if (prevTallTabs !== undefined && prevTallTabs !== twoRows) {
+    if (prevTallTabs !== undefined && prevTallTabs !== showFolder) {
       this._fullRenderSessionTabs();
     }
   },
@@ -2923,7 +2942,7 @@ Object.assign(CodemanApp.prototype, {
           'showFontControls', 'showSystemStats', 'showTokenCount', 'showCost',
           'showLifecycleLog', 'showResponseViewer', 'showRedrawButton',
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
-          'subagentActiveTabOnly', 'tabTwoRows', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
+          'subagentActiveTabOnly', 'tabTwoRows', 'sessionListLayout', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAttachmentsButton', 'showFileViewerButton', 'webglRendererEnabled',
           'language',
           'terminalWheelLocalScrollback',

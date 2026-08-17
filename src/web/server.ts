@@ -76,6 +76,7 @@ import { RunSummaryTracker } from '../run-summary.js';
 import { PlanOrchestrator } from '../plan-orchestrator.js';
 import { OrchestratorLoop } from '../orchestrator-loop.js';
 import { getLifecycleLog } from '../session-lifecycle-log.js';
+import { applyWorkspaceHooks } from '../hooks-config.js';
 import { PushSubscriptionStore } from '../push-store.js';
 import webpush from 'web-push';
 import { SseStreamManager } from './sse-stream-manager.js';
@@ -641,6 +642,7 @@ export class WebServer extends EventEmitter {
       getClaudeModeConfig: this.getClaudeModeConfig.bind(this),
       getTerminalHistoryConfig: this.getTerminalHistoryConfig.bind(this),
       getAgentSkillEnabled: this.getAgentSkillEnabled.bind(this),
+      getWorkspaceHooksEnabled: this.getWorkspaceHooksEnabled.bind(this),
       getClaudeVoiceEnabled: this.getClaudeVoiceEnabled.bind(this),
       getDefaultClaudeMdPath: this.getDefaultClaudeMdPath.bind(this),
       getLightState: this.getLightState.bind(this),
@@ -1394,6 +1396,7 @@ export class WebServer extends EventEmitter {
         { isCodexAvailable },
         { isGeminiAvailable },
         { isAntigravityAvailable },
+        { isPiAvailable },
         { isCloudflaredAvailable },
         { isGitAvailable },
       ] = await Promise.all([
@@ -1402,6 +1405,7 @@ export class WebServer extends EventEmitter {
         import('../utils/codex-cli-resolver.js'),
         import('../utils/gemini-cli-resolver.js'),
         import('../utils/antigravity-cli-resolver.js'),
+        import('../utils/pi-cli-resolver.js'),
         import('../utils/cloudflared-resolver.js'),
         import('../git-clone.js'),
       ]);
@@ -1411,6 +1415,7 @@ export class WebServer extends EventEmitter {
         codex: isCodexAvailable(),
         gemini: isGeminiAvailable(),
         antigravity: isAntigravityAvailable(),
+        pi: isPiAvailable(),
         cloudflared: isCloudflaredAvailable(),
         // Not a run mode: the Add Case → Clone tab is an offer this box cannot
         // keep without git (issue #236), same reasoning as cloudflared above.
@@ -1721,6 +1726,16 @@ export class WebServer extends EventEmitter {
     return settings.agentSkillEnabled === true;
   }
 
+  // Whether a Claude session installs Codeman's hooks block into its workspace
+  // (synced `workspaceHooksEnabled` setting). Default ON — an absent key means a
+  // user who has never seen this setting, and OFF for them would mean no tab
+  // alerts, no Approvals Inbox and no respawn idle signals in every workspace
+  // Codeman did not scaffold itself.
+  private async getWorkspaceHooksEnabled(): Promise<boolean> {
+    const settings = await this.readSettings();
+    return settings.workspaceHooksEnabled !== false;
+  }
+
   // Whether browser dictation may use this machine's Claude Code credentials
   // (synced `claudeVoiceEnabled` setting, default OFF; docs/claude-voice-plan.md).
   // OFF by default because turning it on spends the operator's Claude subscription
@@ -1818,6 +1833,14 @@ export class WebServer extends EventEmitter {
 
       let session: Session | null = null;
       try {
+        // Workspace hooks for this iteration's session — legacy scheduled runs are
+        // always claude-mode and always local, and used to bypass the shared decision
+        // entirely: a scheduled run firing in a linked case that never had an
+        // interactive session ran hook-blind (see applyWorkspaceHooks in hooks-config;
+        // it reads the `workspaceHooksEnabled` setting itself, skips a vanished
+        // workingDir, and swallows failures — a run must never fail on hooks).
+        await applyWorkspaceHooks(run.workingDir);
+
         // Create a session for this iteration.
         if (isMultiUserMode()) {
           // §6.3: resolve the permission mode with the RUN OWNER (a non-granted user
@@ -2650,6 +2673,7 @@ export class WebServer extends EventEmitter {
               codexConfig: muxSession.mode === 'codex' ? savedState?.codexConfig : undefined,
               geminiConfig: muxSession.mode === 'gemini' ? savedState?.geminiConfig : undefined,
               antigravityConfig: muxSession.mode === 'antigravity' ? savedState?.antigravityConfig : undefined,
+              piConfig: muxSession.mode === 'pi' ? savedState?.piConfig : undefined,
               envOverrides: savedEnvOverrides,
               effort: savedState?.effort,
               attachmentHistory: savedAttachmentHistory,
@@ -2657,6 +2681,11 @@ export class WebServer extends EventEmitter {
               // the launch conversation until the user types again, even though
               // the re-attached CLI is on a post-`/clear` one.
               lastSubmitAt: savedState?.lastSubmitAt,
+              // The pane's last output, previous run's value. Without it every
+              // restart restamped all sessions "now" (constructor + the attach
+              // repaint within the same second), flattening the home screens'
+              // most-recently-quiet ordering to tab order after each deploy.
+              lastActivityAt: savedState?.lastActivityAt,
               // Remote SSH metadata must round-trip on recovery: without it the
               // attach cwd falls back to the (nonexistent-locally) remote path and
               // respawn rebuilds a LOCAL command, breaking the pane and silently
@@ -2831,6 +2860,13 @@ export class WebServer extends EventEmitter {
           }
         }
 
+        // Sessions recovered from a previous run predate the create-path hook
+        // install, and these are long-lived: by the time a server restart comes
+        // round a session may be days old and has been running hook-blind the
+        // whole time. Claude Code re-reads settings.local.json, so writing the
+        // block now arms the RUNNING CLI, no session restart needed.
+        await this.ensureHooksForRecoveredWorkspaces();
+
         // Start stats collection for mux sessions
         this.mux.startStatsCollection(STATS_COLLECTION_INTERVAL_MS);
       }
@@ -2854,6 +2890,44 @@ export class WebServer extends EventEmitter {
       }
     } catch (err) {
       console.error('[Server] Failed to restore mux sessions:', err);
+    }
+  }
+
+  /**
+   * Install Codeman's hooks into the workspaces of the sessions just recovered.
+   *
+   * Deduped by workspace, because sessions in one repo share a single
+   * `.claude/settings.local.json` and the write is otherwise repeated per tab.
+   * Claude mode only (nothing else reads `.claude` hooks), never for remote
+   * sessions (their `workingDir` is a path on ANOTHER host, so writing it here
+   * would scaffold a stray directory locally), and never for a docker case that
+   * opted out of hooks.
+   *
+   * Failures are swallowed per workspace: `ensureCodemanHooks` already refuses
+   * unsafe targets with a warning, and a workspace we cannot write to must not
+   * stop the rest of recovery.
+   *
+   * Skipped entirely when `workspaceHooksEnabled` is OFF: that setting exists so a
+   * user can keep Codeman out of their repos, and a boot-time sweep is the last
+   * place that should ignore it.
+   *
+   * A workspace that no longer EXISTS is skipped by applyWorkspaceHooks: a tmux
+   * session can outlive its deleted repo, and `ensureCodemanHooks` mkdir -p's, so
+   * the sweep used to resurrect the directory as an empty tree holding only
+   * `.claude/settings.local.json`.
+   */
+  private async ensureHooksForRecoveredWorkspaces(): Promise<void> {
+    if (!(await this.getWorkspaceHooksEnabled())) return;
+    const workspaces = new Set<string>();
+    for (const session of this.sessions.values()) {
+      if (session.mode !== 'claude' || session.remote) continue;
+      if (session.docker && !session.docker.hooksEnabled) continue;
+      if (session.workingDir) workspaces.add(session.workingDir);
+    }
+    for (const workspace of workspaces) {
+      // install=true: the setting was already resolved ON above for the whole batch
+      // (OFF skips the sweep wholesale, keeping its documented semantics).
+      await applyWorkspaceHooks(workspace, true);
     }
   }
 

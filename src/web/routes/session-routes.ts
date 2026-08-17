@@ -22,6 +22,7 @@ import {
   type CodexConfig,
   type GeminiConfig,
   type AntigravityConfig,
+  type PiConfig,
 } from '../../types.js';
 import { Session, isAltScreenStripMode, isMuxAltScreenOnlyStripMode } from '../../session.js';
 import { SseEvent } from '../sse-events.js';
@@ -81,6 +82,9 @@ import {
   stripCaseEnvKeys,
   applyStatusLineConfig,
   applyAgentSkill,
+  refreshUserAgentSkill,
+  seedAgentSessionPreamble,
+  applyWorkspaceHooks,
   refreshStaleCodemanHooks,
 } from '../../hooks-config.js';
 import { generateClaudeMd } from '../../templates/claude-md.js';
@@ -320,28 +324,49 @@ export function _resetPasteRateBuckets(): void {
  * Antigravity is like Codex: an ABSENT config already defaults safe (no bypass flag), so
  * only a sent config needs the flag forced off. No-op in single-user mode / for a granted
  * owner (canUsernameRunPrivilegedCommands returns true when !isMultiUserMode()).
+ *
+ * Pi has no permission prompts at all, so there is no bypass switch to clamp; its
+ * privilege-shaped knob is `approveProjectTrust`, which makes pi LOAD AND EXECUTE
+ * repo-local `.pi/extensions` TypeScript and npm-install missing project packages.
+ * Pi joins the gemini-style MATERIALIZE branch, not the codex/antigravity
+ * only-if-sent one: pi's absent-config default is an interactive trust prompt the
+ * session user could simply answer "yes" to in the terminal, so merely omitting
+ * `--approve` is not a clamp. Forcing `approveProjectTrust: false` makes
+ * buildPiCommand emit `--no-approve`, and the prompt never appears.
  */
 async function clampExternalCliBypassForOwner(
   owner: string | undefined,
   codexConfig: CodexConfig | undefined,
   geminiConfig: GeminiConfig | undefined,
-  antigravityConfig: AntigravityConfig | undefined
+  antigravityConfig: AntigravityConfig | undefined,
+  piConfig: PiConfig | undefined
 ): Promise<{
   codexConfig: CodexConfig | undefined;
   geminiConfig: GeminiConfig | undefined;
   antigravityConfig: AntigravityConfig | undefined;
+  piConfig: PiConfig | undefined;
 }> {
   const granted = await canUsernameRunPrivilegedCommands(owner);
-  if (granted) return { codexConfig, geminiConfig, antigravityConfig };
+  if (granted) return { codexConfig, geminiConfig, antigravityConfig, piConfig };
   // Non-granted: force codex/antigravity bypass off (only meaningful when a config was
-  // sent) and materialize gemini to auto_edit (clamps an explicit 'yolo' and the yolo default).
+  // sent) and materialize gemini to auto_edit (clamps an explicit 'yolo' and the yolo default)
+  // and pi to --no-approve (clamps an explicit true AND pi's own "ask" default).
   const clampedCodex = codexConfig ? { ...codexConfig, dangerouslyBypassApprovals: false } : codexConfig;
   const clampedGemini: GeminiConfig = { ...(geminiConfig ?? {}), approvalMode: 'auto_edit' };
   const clampedAntigravity = antigravityConfig
     ? { ...antigravityConfig, dangerouslySkipPermissions: false }
     : antigravityConfig;
-  return { codexConfig: clampedCodex, geminiConfig: clampedGemini, antigravityConfig: clampedAntigravity };
+  const clampedPi: PiConfig = { ...(piConfig ?? {}), approveProjectTrust: false };
+  return {
+    codexConfig: clampedCodex,
+    geminiConfig: clampedGemini,
+    antigravityConfig: clampedAntigravity,
+    piConfig: clampedPi,
+  };
 }
+
+/** Test hook: the clamp is the multi-user safety gate for the external CLIs' privileged flags. */
+export const _clampExternalCliBypassForOwner = clampExternalCliBypassForOwner;
 
 // ═══════════════════════════════════════════════════════════════
 // Agent wait helpers (shared by GET /wait, GET /wait-output, POST /input)
@@ -587,6 +612,13 @@ function abortOnClientHangUp(reply: FastifyReply): AbortController {
 async function injectAgentSkill(casePath: string): Promise<void> {
   const skillDir = join(casePath, '.claude', 'skills', 'codeman');
   try {
+    // Claude Code loads a same-named USER-LEVEL skill (`~/.claude/skills/codeman`,
+    // written once by `codeman skill install`) over the case copy injected below, so a
+    // stale user copy silently replaces every fresh injection (observed 2026-08-14: an
+    // old copy cost every spawned worker its lineage arc and the fast path). Keep it
+    // current on the same trigger. Refresh-only + marker-guarded; quiet on refusal,
+    // since a foreign user copy is the user's own authored skill, not a config error.
+    await refreshUserAgentSkill();
     const result = await applyAgentSkill(casePath, true);
     if (result === 'foreign') {
       console.warn(
@@ -601,6 +633,13 @@ async function injectAgentSkill(casePath: string): Promise<void> {
     console.warn(`[agent-skill] injection failed for ${skillDir}: ${getErrorMessage(err)}`);
   }
 }
+
+// Workspace hooks: the install-vs-refresh decision core moved to
+// `applyWorkspaceHooks` in hooks-config.ts (imported above) so the non-route
+// claude create paths — cron fires, legacy scheduled runs, the plan-orchestrator
+// one-shots, the boot recovery sweep — share the SAME decision instead of
+// bypassing the `workspaceHooksEnabled` setting. Route handlers here resolve the
+// setting through the ConfigPort (tests stub it) and pass it as the second arg.
 
 export function registerSessionRoutes(
   app: FastifyInstance,
@@ -714,6 +753,7 @@ export function registerSessionRoutes(
       body.mode !== 'codex' &&
       body.mode !== 'gemini' &&
       body.mode !== 'antigravity' &&
+      body.mode !== 'pi' &&
       body.envOverrides &&
       Object.keys(body.envOverrides).length > 0 &&
       (workingDir.startsWith(CASES_DIR + '/') || workingDir.startsWith(managedCasesBase + '/'));
@@ -737,15 +777,25 @@ export function registerSessionRoutes(
     // chip's data feed for everyone. The exporter is benign when the chip is off
     // (the footer just shows session status). isOurs-guarded so a user's own
     // statusLine is never touched.
-    if ((body.mode ?? 'claude') === 'claude' && body.statusLineTelemetry === true) {
+    //
+    // Same guard as the hooks call below (499d355): never for a remote attach
+    // (workingDir is a user@host:session pseudo-path — the mkdir inside
+    // applyStatusLineConfig would create it as a junk local dir), and only when
+    // the caller named a workingDir — the process-cwd fallback is $HOME under
+    // installer-created services, and a statusLine materializing in
+    // ~/.claude/settings.local.json was never asked for.
+    if (!remote && body.workingDir && (body.mode ?? 'claude') === 'claude' && body.statusLineTelemetry === true) {
       await applyStatusLineConfig(workingDir, true);
     }
 
-    // COD-91 self-heal: refresh a pre-secret hooks block in an existing case so the now
-    // unconditional hook-secret gate keeps accepting its hook events. No-op for fresh
-    // cases (writeHooksConfig already wrote the secret) and for non-Codeman/absent hooks.
-    if ((body.mode ?? 'claude') === 'claude') {
-      await refreshStaleCodemanHooks(workingDir).catch(() => {});
+    // Hooks for the workspace this session runs in (install vs refresh-only is the
+    // `workspaceHooksEnabled` setting; see applyWorkspaceHooks). Never for a remote
+    // attach (workingDir is a user@host:session pseudo-path — mkdir would create it
+    // as a junk local dir), and only when the caller named a workingDir: the
+    // process-cwd fallback is $HOME under installer-created services, and hooks
+    // materializing in ~/.claude/settings.local.json was never asked for.
+    if (!remote && body.workingDir && (body.mode ?? 'claude') === 'claude') {
+      await applyWorkspaceHooks(workingDir, await ctx.getWorkspaceHooksEnabled());
       // Agent skill (docs/agent-control-plan.md §2): ADD-ONLY on create, same shared-
       // .claude rationale as the statusLine above: a create must never remove the
       // skill from under other live sessions in the repo. Marker-guarded, so a
@@ -796,6 +846,15 @@ export function registerSessionRoutes(
         );
       }
     }
+    if (body.mode === 'pi') {
+      const { isPiAvailable } = await import('../../utils/pi-cli-resolver.js');
+      if (!isPiAvailable()) {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent'
+        );
+      }
+    }
 
     // Pre-validate resumeSessionId: check that the conversation file actually exists
     // in Claude's projects directory. If not, skip resume to avoid confusing
@@ -839,9 +898,11 @@ export function registerSessionRoutes(
             ? body.geminiConfig?.model
             : mode === 'antigravity'
               ? body.antigravityConfig?.model
-              : mode !== 'shell'
-                ? modelConfig?.defaultModel || undefined
-                : undefined;
+              : mode === 'pi'
+                ? body.piConfig?.model
+                : mode !== 'shell'
+                  ? modelConfig?.defaultModel || undefined
+                  : undefined;
     const claudeModeConfig = await ctx.getClaudeModeConfig();
     // Section 6.3: force non-granted users to a classifier-guarded mode.
     const effectiveClaudeMode = await resolveClaudeModeForUsername(claudeModeConfig.claudeMode, owner);
@@ -850,7 +911,14 @@ export function registerSessionRoutes(
       codexConfig: gatedCodexConfig,
       geminiConfig: gatedGeminiConfig,
       antigravityConfig: gatedAntigravityConfig,
-    } = await clampExternalCliBypassForOwner(owner, body.codexConfig, body.geminiConfig, body.antigravityConfig);
+      piConfig: gatedPiConfig,
+    } = await clampExternalCliBypassForOwner(
+      owner,
+      body.codexConfig,
+      body.geminiConfig,
+      body.antigravityConfig,
+      body.piConfig
+    );
     const terminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const session = new Session({
       workingDir,
@@ -866,6 +934,7 @@ export function registerSessionRoutes(
       codexConfig: mode === 'codex' ? gatedCodexConfig : undefined,
       geminiConfig: mode === 'gemini' ? gatedGeminiConfig : undefined,
       antigravityConfig: mode === 'antigravity' ? gatedAntigravityConfig : undefined,
+      piConfig: mode === 'pi' ? gatedPiConfig : undefined,
       resumeSessionId: validatedResumeId,
       envOverrides: body.envOverrides,
       effort: body.effort,
@@ -879,6 +948,13 @@ export function registerSessionRoutes(
     ctx.store.incrementSessionsCreated();
     ctx.persistSessionState(session);
     await ctx.setupSessionListeners(session);
+    // Pre-seed the agent skill's preamble cache so its §0 bootstrap is a two-line
+    // loader (see seedAgentSessionPreamble). Local claude sessions only; best-effort.
+    if (mode === 'claude' && !remote && (await ctx.getAgentSkillEnabled())) {
+      await seedAgentSessionPreamble(session.id).catch((err: unknown) =>
+        console.warn(`[agent-skill] preamble seed failed for ${session.id}: ${getErrorMessage(err)}`)
+      );
+    }
     getLifecycleLog().log({ event: 'created', sessionId: session.id, name: session.name });
 
     // Use light state for broadcast + response — buffers are fetched on-demand via /terminal.
@@ -1080,12 +1156,16 @@ export function registerSessionRoutes(
 
     try {
       // Auto-detect completion phrase from CLAUDE.md BEFORE starting (only if globally enabled and not explicitly disabled by user)
-      // Ralph tracker is not supported for opencode / codex / gemini / antigravity sessions
+      // Ralph tracker is not supported for opencode / codex / gemini / antigravity / pi sessions.
+      // Keep this list in step with isExternalCliMode(): _processExpensiveParsers() returns early
+      // for those modes, so a tracker enabled here would never be fed, and the session would
+      // still report ralphEnabled + Ralph UI state that no other external CLI shows.
       if (
         session.mode !== 'opencode' &&
         session.mode !== 'codex' &&
         session.mode !== 'gemini' &&
         session.mode !== 'antigravity' &&
+        session.mode !== 'pi' &&
         ctx.store.getConfig().ralphEnabled &&
         !session.ralphTracker.autoEnableDisabled
       ) {
@@ -2254,6 +2334,14 @@ export function registerSessionRoutes(
     }
     const fullSize = rawBuffer.length;
     let truncated = false;
+    // WHY the reason and not just the boolean (#258): `truncated` is set at two
+    // sites that mean opposite things to a user. 'tail' is an intentional
+    // partial replay and the rest is still retained, so a `full=1` pull recovers
+    // it. 'capped' means we hit the byte ceiling — and on a full-history capture
+    // that is already everything tmux holds, so the oldest output is genuinely
+    // out of reach rather than one click away. Collapsing both into one flag is
+    // why the UI could only ever say "truncated for performance".
+    let truncationReason: 'capped' | 'tail' | null = null;
     let cleanBuffer: string;
 
     // Cap the payload EARLY — before the regex normalization passes below run
@@ -2264,6 +2352,7 @@ export function registerSessionRoutes(
     if (terminalBufferMaxBytes > 0 && rawBuffer.length > terminalBufferMaxBytes) {
       rawBuffer = rawBuffer.slice(-terminalBufferMaxBytes);
       truncated = true;
+      truncationReason = 'capped';
       const capNewline = rawBuffer.indexOf('\n');
       if (capNewline > 0 && capNewline < 4096) {
         rawBuffer = rawBuffer.slice(capNewline + 1);
@@ -2297,6 +2386,9 @@ export function registerSessionRoutes(
       // Banner is near the top and gets discarded by tail anyway.
       cleanBuffer = strippedBuffer.slice(-tailBytes);
       truncated = true;
+      // 'capped' already means the oldest bytes are gone for good; a tail cut on
+      // top of it does not soften that, so the stronger reason wins.
+      truncationReason ??= 'tail';
       // Avoid starting mid-ANSI-escape: find first newline within the first 4KB
       // and start from there. This prevents xterm.js from parsing a partial escape
       // sequence which corrupts cursor position for all subsequent Ink redraws.
@@ -2327,6 +2419,10 @@ export function registerSessionRoutes(
       status: session.status,
       fullSize,
       truncated,
+      truncationReason,
+      // `retainedBytes` is what this response actually carries; `fullSize` is
+      // what existed before the cut. The gap is what the indicator reports.
+      retainedBytes: cleanBuffer.length,
       source,
     };
   });
@@ -2579,6 +2675,7 @@ export function registerSessionRoutes(
       codexConfig,
       geminiConfig,
       antigravityConfig,
+      piConfig,
       envOverrides,
       effort,
       parentSessionId,
@@ -2629,6 +2726,7 @@ export function registerSessionRoutes(
         codexConfig ||
         geminiConfig ||
         antigravityConfig ||
+        piConfig ||
         openCodeConfig
       ) {
         return createErrorResponse(
@@ -2660,6 +2758,7 @@ export function registerSessionRoutes(
         codexConfig ||
         geminiConfig ||
         antigravityConfig ||
+        piConfig ||
         openCodeConfig
       ) {
         return createErrorResponse(
@@ -2763,6 +2862,17 @@ export function registerSessionRoutes(
         }
       }
 
+      // Check Pi availability if requested
+      if (mode === 'pi') {
+        const { isPiAvailable } = await import('../../utils/pi-cli-resolver.js');
+        if (!isPiAvailable()) {
+          return createErrorResponse(
+            ApiErrorCode.OPERATION_FAILED,
+            'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent'
+          );
+        }
+      }
+
       // Resolve case path: check linked-cases registry first, then fall back to CASES_DIR.
       // This mirrors the behaviour of resolveCasePath() in case-routes so that linked
       // external project directories are honoured by quick-start just like regular case routes.
@@ -2810,7 +2920,7 @@ export function registerSessionRoutes(
 
         // Write .claude/settings.local.json with hooks for desktop notifications
         // (Claude-specific — OpenCode, Codex, Gemini, and Antigravity use their own systems)
-        if (mode !== 'opencode' && mode !== 'codex' && mode !== 'gemini' && mode !== 'antigravity') {
+        if (mode !== 'opencode' && mode !== 'codex' && mode !== 'gemini' && mode !== 'antigravity' && mode !== 'pi') {
           await writeHooksConfig(resolvedCasePath);
         }
 
@@ -2819,11 +2929,17 @@ export function registerSessionRoutes(
         return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `Failed to create case: ${getErrorMessage(err)}`);
       }
     } else if (!remote && !docker && mode !== 'opencode') {
-      // COD-91 self-heal for an EXISTING case: refresh a pre-secret hooks block so the
-      // now-unconditional hook-secret gate keeps accepting its hook events. No-op when
-      // the hooks aren't ours or already carry the secret. Skipped for remote cases —
-      // resolvedCasePath is a REMOTE path that doesn't exist on the local filesystem.
-      await refreshStaleCodemanHooks(resolvedCasePath).catch(() => {});
+      // EXISTING case directory (a linked case, a cloned repo, anything Codeman did
+      // not scaffold): install-or-refresh per the setting (see applyWorkspaceHooks).
+      // Other modes keep the narrower COD-91 self-heal unconditionally: only claude
+      // reads `.claude` hooks, so a shell/codex quick-start should not author a block
+      // of its own. Skipped for remote cases — resolvedCasePath is a REMOTE path that
+      // doesn't exist on the local filesystem.
+      if (mode === 'claude') {
+        await applyWorkspaceHooks(resolvedCasePath, await ctx.getWorkspaceHooksEnabled());
+      } else {
+        await refreshStaleCodemanHooks(resolvedCasePath).catch(() => {});
+      }
     }
 
     // Agent skill injection (docs/agent-control-plan.md §2): ADD-ONLY on create,
@@ -2838,15 +2954,11 @@ export function registerSessionRoutes(
     // Docker cases: the workspace is a REAL host dir bind-mounted into the container.
     // Scaffold hooks (+ a CLAUDE.md) if MISSING so in-container permission prompts and
     // hook-idle detection fire (decision: wire hooks now). Never clobbers an existing
-    // configured project. Skipped for external CLIs (they use their own systems).
-    if (
-      docker &&
-      docker.hooksEnabled &&
-      mode !== 'opencode' &&
-      mode !== 'codex' &&
-      mode !== 'gemini' &&
-      mode !== 'antigravity'
-    ) {
+    // configured project. Claude mode ONLY — only claude reads `.claude` hooks, so a
+    // shell or external-CLI quick-start must not author a block of its own (the same
+    // rule the existing-case branch above states; this branch used to exclude just
+    // the five external CLIs and let `shell` through).
+    if (docker && docker.hooksEnabled && mode === 'claude') {
       try {
         if (!existsSync(join(resolvedCasePath, 'CLAUDE.md'))) {
           const templatePath = await ctx.getDefaultClaudeMdPath();
@@ -2855,7 +2967,10 @@ export function registerSessionRoutes(
         if (!existsSync(join(resolvedCasePath, '.claude', 'settings.local.json'))) {
           await writeHooksConfig(resolvedCasePath);
         } else {
-          await refreshStaleCodemanHooks(resolvedCasePath).catch(() => {});
+          // A settings file with no hooks in it is the same dead-surface case as a
+          // linked case. This branch is already gated on `docker.hooksEnabled`, and
+          // applyWorkspaceHooks adds the user-level gate on top.
+          await applyWorkspaceHooks(resolvedCasePath, await ctx.getWorkspaceHooksEnabled());
         }
       } catch {
         /* non-fatal — the session still runs, hooks may be degraded */
@@ -2876,6 +2991,7 @@ export function registerSessionRoutes(
       mode !== 'codex' &&
       mode !== 'gemini' &&
       mode !== 'antigravity' &&
+      mode !== 'pi' &&
       !remote &&
       envOverrides &&
       Object.keys(envOverrides).length > 0
@@ -2896,9 +3012,11 @@ export function registerSessionRoutes(
             ? geminiConfig?.model
             : mode === 'antigravity'
               ? antigravityConfig?.model
-              : mode !== 'shell'
-                ? qsModelConfig?.defaultModel || undefined
-                : undefined;
+              : mode === 'pi'
+                ? piConfig?.model
+                : mode !== 'shell'
+                  ? qsModelConfig?.defaultModel || undefined
+                  : undefined;
     const qsClaudeModeConfig = await ctx.getClaudeModeConfig();
     const qsEffectiveClaudeMode = await resolveClaudeModeForUsername(qsClaudeModeConfig.claudeMode, owner);
     // Section 6.3: clamp Codex/Gemini/Antigravity bypass switches for a non-granted owner (no-op single-user/granted).
@@ -2906,7 +3024,8 @@ export function registerSessionRoutes(
       codexConfig: qsGatedCodexConfig,
       geminiConfig: qsGatedGeminiConfig,
       antigravityConfig: qsGatedAntigravityConfig,
-    } = await clampExternalCliBypassForOwner(owner, codexConfig, geminiConfig, antigravityConfig);
+      piConfig: qsGatedPiConfig,
+    } = await clampExternalCliBypassForOwner(owner, codexConfig, geminiConfig, antigravityConfig, piConfig);
     const qsTerminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const session = new Session({
       workingDir: resolvedCasePath,
@@ -2923,6 +3042,7 @@ export function registerSessionRoutes(
       codexConfig: mode === 'codex' ? qsGatedCodexConfig : undefined,
       geminiConfig: mode === 'gemini' ? qsGatedGeminiConfig : undefined,
       antigravityConfig: mode === 'antigravity' ? qsGatedAntigravityConfig : undefined,
+      piConfig: mode === 'pi' ? qsGatedPiConfig : undefined,
       envOverrides,
       launchCommand: mode === 'shell' ? launchCommand : undefined,
       effort,
@@ -2947,6 +3067,13 @@ export function registerSessionRoutes(
     ctx.store.incrementSessionsCreated();
     ctx.persistSessionState(session);
     await ctx.setupSessionListeners(session);
+    // Pre-seed the agent skill's preamble cache so its §0 bootstrap is a two-line
+    // loader (see seedAgentSessionPreamble). Local claude sessions only; best-effort.
+    if (mode === 'claude' && !remote && !docker && (await ctx.getAgentSkillEnabled())) {
+      await seedAgentSessionPreamble(session.id).catch((err: unknown) =>
+        console.warn(`[agent-skill] preamble seed failed for ${session.id}: ${getErrorMessage(err)}`)
+      );
+    }
     getLifecycleLog().log({
       event: 'created',
       sessionId: session.id,

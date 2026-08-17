@@ -50,6 +50,7 @@ import {
   type EffortLevel,
   type GeminiConfig,
   type AntigravityConfig,
+  type PiConfig,
   type SessionRemote,
   type SessionDocker,
   type SessionBackend,
@@ -135,6 +136,14 @@ const MUX_STARTUP_DELAY_MS = 300;
 /** Delay before declaring session idle after last output (2 seconds) */
 const IDLE_DETECTION_DELAY_MS = 2000;
 
+// How long after construction a RECOVERED session's wire activity stamp keeps
+// its restored previous-run value. Recovery attaches every pane at boot and the
+// attach repaint arrives as ordinary PTY output; without this window that
+// repaint would overwrite every restored stamp within the same second, which is
+// exactly the restart flattening the restore exists to prevent. Real actions
+// (input, task assignment, respawn) always stamp through it.
+const WIRE_ACTIVITY_SETTLE_MS = 15_000;
+
 // Note: Auto-compact/clear timing constants moved to session-auto-ops.ts
 
 /** Graceful shutdown delay when stopping session (100ms) */
@@ -163,7 +172,7 @@ const NEWLINE_SPLIT_PATTERN = /\r?\n/;
 
 /** True for external-CLI run modes (non-Claude) that use their own TUI and output format. */
 export function isExternalCliMode(mode: SessionMode): boolean {
-  return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity';
+  return mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity' || mode === 'pi';
 }
 
 function getModeLabel(mode: SessionMode): string {
@@ -176,6 +185,8 @@ function getModeLabel(mode: SessionMode): string {
       return 'Gemini';
     case 'antigravity':
       return 'Antigravity';
+    case 'pi':
+      return 'Pi';
     case 'shell':
       return 'Shell';
     case 'claude':
@@ -191,9 +202,21 @@ function getModeLabel(mode: SessionMode): string {
  * Codex, Claude Code, and Gemini are known, controlled (Ink/React) TUIs that
  * repaint via cursor positioning, so dropping the alt-screen switch is safe —
  * content stays in the normal buffer. Excluded: `shell` (arbitrary programs like
- * vim/less/htop legitimately need the alt screen) and `opencode` (renders its own
- * TUI that may rely on it). Keep parity with the replay-side strip in
- * session-routes.ts.
+ * vim/less/htop legitimately need the alt screen), `opencode` (renders its own
+ * TUI that may rely on it) and `pi` (below). Keep parity with the replay-side
+ * strip in session-routes.ts.
+ *
+ * ⚠️ Being excluded here does NOT preserve the alt screen. Every excluded mode
+ * falls through to isMuxAltScreenOnlyStripMode(), which strips the alt-screen
+ * toggles too whenever the session is tmux-backed, and pi/opencode ALWAYS are
+ * (both refuse the direct-PTY fallback). What exclusion actually buys is the rest
+ * of the full strip: `\x1b[3J` and the mouse-tracking DECSETs survive. That is the
+ * real reason pi is out: its default TUI renders into the MAIN screen with
+ * terminal-owned scrollback and is mouse-aware, so it is a `3J`/mouse consumer in
+ * a way an Ink TUI repainting in place is not. Consequence to know before
+ * debugging it: pi's runtime-switchable fullscreen TUI (`/settings`, 0.84.0+)
+ * still gets its `?1049h` stripped and paints into the main buffer, exactly like
+ * vim inside a tmux `shell` session.
  */
 export function isAltScreenStripMode(mode: SessionMode): boolean {
   return mode === 'codex' || mode === 'claude' || mode === 'gemini';
@@ -378,6 +401,12 @@ export class Session extends EventEmitter {
   private _textOutput = new BufferAccumulator(MAX_TEXT_OUTPUT_SIZE, TEXT_OUTPUT_TRIM_SIZE);
   private _errorBuffer: string = '';
   private _lastActivityAt: number;
+  // Display twin of _lastActivityAt, reported by toState()/the getter. It can
+  // lag behind on recovery: the restored previous-run stamp survives the attach
+  // repaint (see _markActivity), so a restart does not flatten the home
+  // screens' quiet ordering. Idle detection never reads it.
+  private _wireActivityAt: number;
+  private _wireActivitySettleUntil: number;
   private _claudeSessionId: string | null = null;
   private _totalCost: number = 0;
   private _messages: ClaudeMessage[] = [];
@@ -469,6 +498,8 @@ export class Session extends EventEmitter {
   private _geminiConfig: GeminiConfig | undefined;
   // Antigravity configuration (only for mode === 'antigravity')
   private _antigravityConfig: AntigravityConfig | undefined;
+  // Pi configuration (only for mode === 'pi')
+  private _piConfig: PiConfig | undefined;
   private _resumeSessionId: string | undefined;
 
   // Ephemeral env overrides (e.g., CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS). Exported by tmux
@@ -563,6 +594,8 @@ export class Session extends EventEmitter {
       geminiConfig?: GeminiConfig;
       /** Antigravity configuration (only for mode === 'antigravity') */
       antigravityConfig?: AntigravityConfig;
+      /** Pi configuration (only for mode === 'pi') */
+      piConfig?: PiConfig;
       /** Resume a previous Claude conversation (used after server reboot) */
       resumeSessionId?: string;
       /** Extra env vars exported to the CLI at spawn time (no disk persistence) */
@@ -577,6 +610,8 @@ export class Session extends EventEmitter {
       attachmentHistory?: SessionAttachmentHistoryItem[];
       /** Restored wall-clock ms of the pane's last Enter (see `lastSubmitAt`). */
       lastSubmitAt?: number;
+      /** Restored wall-clock ms of the pane's last output (recovery only; see `_wireActivityAt`). */
+      lastActivityAt?: number;
       /** Remote execution metadata for sessions launched through SSH inside local tmux. */
       remote?: SessionRemote;
       /** Docker execution metadata for sessions launched inside a container via local tmux. */
@@ -605,9 +640,18 @@ export class Session extends EventEmitter {
     // NOW, not `createdAt`: recovery passes the ORIGINAL creation time of a
     // days-old tmux session, and seeding last-activity from it would report a
     // freshly re-attached pane as having been silent for days, which the idle
-    // confirmation reads as "already quiet" and the home screens print as its
-    // idle duration. For a genuinely new session the two are the same instant.
+    // confirmation reads as "already quiet". For a genuinely new session the
+    // two are the same instant.
     this._lastActivityAt = Date.now();
+    // The WIRE copy of the stamp is allowed to be older: recovery threads the
+    // previous run's value so a restart does not flatten the home screens'
+    // most-recently-quiet ordering (every stamp otherwise resets to boot time,
+    // and the attach repaint re-bumps the rest within the same second). The
+    // settle window in _markActivity() carries the restored value through that
+    // repaint; the private stamp above stays boot-anchored because the idle
+    // confirmation reads it as "how long has the pane been quiet".
+    this._wireActivityAt = config.lastActivityAt || Date.now();
+    this._wireActivitySettleUntil = config.lastActivityAt ? Date.now() + WIRE_ACTIVITY_SETTLE_MS : 0;
     // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
     this._claudeSessionId = config.resumeSessionId || this.id;
     // Restored from state.json on boot recovery. start() resets _claudeSessionId
@@ -656,6 +700,11 @@ export class Session extends EventEmitter {
     // Apply Antigravity configuration
     if (config.antigravityConfig) {
       this._antigravityConfig = config.antigravityConfig;
+    }
+
+    // Apply Pi configuration
+    if (config.piConfig) {
+      this._piConfig = config.piConfig;
     }
 
     // Apply env overrides (exported at spawn, not persisted to disk).
@@ -783,7 +832,21 @@ export class Session extends EventEmitter {
   }
 
   get lastActivityAt(): number {
-    return this._lastActivityAt;
+    return this._wireActivityAt;
+  }
+
+  /**
+   * Stamp activity NOW. The private stamp (idle detection's "how long has the
+   * pane been quiet") always moves; the wire stamp holds its restored value
+   * through the post-recovery attach-repaint window unless the activity is a
+   * real action (input, task assignment, respawn), which always writes through.
+   */
+  private _markActivity(realAction = false): void {
+    this._lastActivityAt = Date.now();
+    if (realAction || Date.now() >= this._wireActivitySettleUntil) {
+      this._wireActivityAt = this._lastActivityAt;
+      this._wireActivitySettleUntil = 0;
+    }
   }
 
   get claudeSessionId(): string | null {
@@ -1287,7 +1350,9 @@ export class Session extends EventEmitter {
       parentSessionId: this._parentSessionId,
       currentTaskId: this._currentTaskId,
       createdAt: this.createdAt,
-      lastActivityAt: this._lastActivityAt,
+      // The wire twin, not the private stamp: it survives the post-recovery
+      // attach repaint, so the home screens' quiet ordering survives a restart.
+      lastActivityAt: this._wireActivityAt,
       name: this._name,
       mode: this.mode,
       autoClearEnabled: this._autoOps.autoClearEnabled,
@@ -1321,6 +1386,7 @@ export class Session extends EventEmitter {
       codexConfig: this._codexConfig,
       geminiConfig: this._geminiConfig,
       antigravityConfig: this._antigravityConfig,
+      piConfig: this._piConfig,
       resumeSessionId: this._resumeSessionId,
       effort: this._effort,
       // COD-118: runtime-only — surfaced so the frontend can require explicit user
@@ -1490,9 +1556,11 @@ export class Session extends EventEmitter {
           cols: ptyCols,
           rows: ptyRows,
           cwd: resolveMuxAttachCwd(this.workingDir, this._remote, this._docker),
-          // COD-75: codex/gemini/antigravity get COLORTERM=truecolor — mirrors buildEnvExports()
+          // COD-75: codex/gemini/antigravity/pi get COLORTERM=truecolor — mirrors buildEnvExports()
           // in tmux-manager.ts so the attach client and the tmux session agree.
-          env: buildMuxAttachEnv(this.mode === 'codex' || this.mode === 'gemini' || this.mode === 'antigravity'),
+          env: buildMuxAttachEnv(
+            this.mode === 'codex' || this.mode === 'gemini' || this.mode === 'antigravity' || this.mode === 'pi'
+          ),
         })
       );
     } catch (spawnErr) {
@@ -1560,6 +1628,7 @@ export class Session extends EventEmitter {
       codexConfig: this._codexConfig,
       geminiConfig: this._geminiConfig,
       antigravityConfig: this._antigravityConfig,
+      piConfig: this._piConfig,
       resumeSessionId: this._resumeSessionId,
       envOverrides: this._envOverrides,
       effort: this._effort,
@@ -1650,7 +1719,7 @@ export class Session extends EventEmitter {
 
     // BufferAccumulator handles auto-trimming when max size exceeded
     this._terminalBuffer.append(data);
-    this._lastActivityAt = Date.now();
+    this._markActivity();
     this.emit('terminal', data);
     this.emit('output', data);
   }
@@ -1774,6 +1843,7 @@ export class Session extends EventEmitter {
             codexConfig: this._codexConfig,
             geminiConfig: this._geminiConfig,
             antigravityConfig: this._antigravityConfig,
+            piConfig: this._piConfig,
             resumeSessionId: this._resumeSessionId,
             envOverrides: this._envOverrides,
             effort: this._effort,
@@ -1858,6 +1928,10 @@ export class Session extends EventEmitter {
       // Antigravity sessions require tmux for env override injection via setenv
       if (this.mode === 'antigravity') {
         throw new Error('Antigravity sessions require tmux. Direct PTY fallback is not supported.');
+      }
+      // Pi sessions require tmux for env override injection via setenv
+      if (this.mode === 'pi') {
+        throw new Error('Pi sessions require tmux. Direct PTY fallback is not supported.');
       }
       try {
         // Pass --session-id to use the SAME ID as the Codeman session
@@ -2547,7 +2621,7 @@ export class Session extends EventEmitter {
     this._messages = [];
     this._lineBuffer = '';
     this._altScreenSeqCarry = '';
-    this._lastActivityAt = Date.now();
+    this._markActivity(true);
   }
 
   private _clearAllTimers(): void {
@@ -3146,7 +3220,7 @@ export class Session extends EventEmitter {
   // Legacy method for sending input - wraps runPrompt
   async sendInput(input: string): Promise<void> {
     this._status = 'busy';
-    this._lastActivityAt = Date.now();
+    this._markActivity(true);
     this.runPrompt(input).catch((err) => {
       const errorMsg = getErrorMessage(err);
       // Clean up task state so the task queue doesn't get stuck
@@ -3154,7 +3228,7 @@ export class Session extends EventEmitter {
         const taskId = this._currentTaskId;
         this._currentTaskId = null;
         this._status = 'idle';
-        this._lastActivityAt = Date.now();
+        this._markActivity(true);
         this.emit('taskError', taskId, errorMsg);
       } else {
         this._status = 'idle';
@@ -3315,13 +3389,13 @@ export class Session extends EventEmitter {
     this._textOutput.clear();
     this._errorBuffer = '';
     this._messages = [];
-    this._lastActivityAt = Date.now();
+    this._markActivity(true);
   }
 
   clearTask(): void {
     this._currentTaskId = null;
     this._status = 'idle';
-    this._lastActivityAt = Date.now();
+    this._markActivity(true);
   }
 
   getOutput(): string {
