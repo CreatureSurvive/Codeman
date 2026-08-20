@@ -2343,12 +2343,8 @@ class CodemanApp {
     const bufferLoadOwner = this._beginBufferLoad();
     let replayStarted = false;
     try {
-      let res = await this._fetchTerminalBufferResponse(sessionId, { full: true });
-      let data = (await res.json())?.data ?? {};
-      if (data.terminalBuffer && this._replayWouldShrinkBuffer(data.terminalBuffer)) {
-        res = await this._fetchTerminalBufferResponse(sessionId, { full: false });
-        data = (await res.json())?.data ?? {};
-      }
+      const res = await this._fetchTerminalBufferResponse(sessionId, { full: true });
+      const data = (await res.json())?.data ?? {};
       if (sessionId !== this.activeSessionId || this._bufferLoadOwner !== bufferLoadOwner) return;
       if (data.terminalBuffer) {
         const before = this.terminal.buffer?.active;

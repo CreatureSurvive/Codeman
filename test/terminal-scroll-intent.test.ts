@@ -199,18 +199,17 @@ describe('backpressure refresh keeps a reader in place (issue #259)', () => {
     expect(body).toContain('this.terminal.scrollToLine(target)');
   });
 
-  it('recovers FULL history, guarded against a repaint-pane downgrade', () => {
-    // Measured before the fix: this path rewrote an 869-row buffer from a 1MB
-    // tail and left 158 rows, so the refresh meant to REPAIR the terminal was
-    // destroying most of its scrollback. It asks for full history now, and
-    // falls back to the tail only when the full capture would shrink the buffer
-    // (a repaint-mode pane keeps roughly one frame in tmux).
+  it('recovers from the canonical FULL capture, never the tail/hybrid stream', () => {
+    // Measured on a live Claude/GLM pane: the full capture was a clean rendered
+    // tmux frame, while the tail endpoint mixed accumulated repaint bytes with
+    // a visible-frame capture. Falling back to tail during corruption recovery
+    // reintroduced the exact partial Ink redraw stream the refresh was meant to
+    // replace, so needsRefresh must not use that fallback.
     const app = readFileSync(resolve(PUBLIC, 'app.js'), 'utf8');
     const start = app.indexOf('async _onSessionNeedsRefresh(event = {})');
     const body = app.slice(start, app.indexOf('\n  async _onSessionClearTerminal', start));
     expect(body).toContain('_fetchTerminalBufferResponse(sessionId, { full: true })');
-    expect(body).toContain('this._replayWouldShrinkBuffer(data.terminalBuffer)');
-    // The tail must survive as the fallback, not vanish.
-    expect(body).toContain('_fetchTerminalBufferResponse(sessionId, { full: false })');
+    expect(body).not.toContain('this._replayWouldShrinkBuffer(data.terminalBuffer)');
+    expect(body).not.toContain('_fetchTerminalBufferResponse(sessionId, { full: false })');
   });
 });

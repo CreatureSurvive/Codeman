@@ -57,7 +57,15 @@ function hollowClaudeApp(overrides: { cliVersion?: string; rows?: number } = {})
     cols: 80,
     rows: overrides.rows ?? 36,
     modes: { mouseTrackingMode: 'none' },
-    buffer: { active: { type: 'normal', viewportY: 0, baseY: 0, length: 36 } },
+    buffer: {
+      active: {
+        type: 'normal',
+        viewportY: 0,
+        baseY: 0,
+        length: 36,
+        getLine: () => ({ translateToString: () => '' }),
+      },
+    },
   };
   return { app, sent, logs };
 }
@@ -211,7 +219,10 @@ describe('PageUp/PageDown fallback for a hollow local buffer (issue #205 round 2
     // Wheel: after the forwarding gate, before the local smooth scroll.
     expect(source).toContain('if (this._maybePageCliTranscript(ev, lines)) return;');
     // Touch: touchmove and the momentum loop both fall through to it.
-    expect(source.match(/else if \(!this\._maybePageCliTranscript\(\{ shiftKey: false \}, lines\)\)/g)).toHaveLength(2);
+    expect(source).toContain('this._maybePageCliTranscript({ ...ev, allowNonHollow: true }, lines)');
+    expect(source).toContain(
+      'this._maybePageCliTranscript({ shiftKey: false, allowNonHollow: true, pageFraction: 0.3 }, pending)'
+    );
   });
 });
 
