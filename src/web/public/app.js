@@ -666,8 +666,6 @@ class CodemanApp {
     this._wsReady = false;      // True when WS is open and ready for I/O
     this._wsState = 'disconnected'; // connecting | connected | reconnecting | fallback | disconnected
     this._wsLastRecvAt = 0;     // ms timestamp of the last frame received on the active WS
-    this._wsOutputSessionId = null;
-    this._wsOutputSuppressUntil = 0;
 
     // Terminal write batching with DEC 2026 sync support
     this.pendingWrites = [];
@@ -1835,30 +1833,18 @@ class CodemanApp {
     if (this.sessions.size === 0) this.stopSystemStatsPolling();
   }
 
-  // SSE wrappers — skip terminal events when WebSocket is delivering for this session.
-  // WS handler calls the underlying _onSession* methods directly.
+  // SSE is the single source of terminal output. WebSocket remains the low-latency
+  // input/resize path, but must never mirror output into xterm: SSE and WS batch the
+  // same PTY byte stream independently, so a timing-based handoff can duplicate an
+  // Ink cursor-up redraw and permanently corrupt the browser's terminal state.
   _onSSETerminal(data) {
-    if (this._shouldSuppressSseTerminal(data?.id)) return;
     this._onSessionTerminal(data);
   }
   _onSSENeedsRefresh(data) {
-    if (this._shouldSuppressSseTerminal(data?.id || this.activeSessionId)) return;
     this._onSessionNeedsRefresh(data);
   }
   _onSSEClearTerminal(data) {
-    if (this._shouldSuppressSseTerminal(data?.id)) return;
     this._onSessionClearTerminal(data);
-  }
-
-  _markWsTerminalOutput(sessionId) {
-    this._wsOutputSessionId = sessionId;
-    this._wsOutputSuppressUntil = Date.now() + 1500;
-  }
-
-  _shouldSuppressSseTerminal(sessionId) {
-    if (!sessionId) return false;
-    if (this._wsReady && this._wsSessionId === sessionId) return true;
-    return this._wsOutputSessionId === sessionId && Date.now() < this._wsOutputSuppressUntil;
   }
 
   _onSessionTerminal(data) {
@@ -2700,15 +2686,7 @@ class CodemanApp {
       this._wsLastRecvAt = Date.now();
       try {
         const msg = JSON.parse(event.data);
-        if (msg.t === 'o') {
-          // Terminal output — route through the same batching pipeline as SSE
-          this._markWsTerminalOutput(sessionId);
-          this._onSessionTerminal({ id: sessionId, data: msg.d });
-        } else if (msg.t === 'c') {
-          this._onSessionClearTerminal({ id: sessionId });
-        } else if (msg.t === 'r') {
-          this._onSessionNeedsRefresh({ id: sessionId });
-        } else if (msg.t === 'ia') {
+        if (msg.t === 'ia') {
           // Input ACK — the server applied (or deduped) this seq; drop it from
           // the durable queue so it can never be re-delivered/lost.
           this._onWsInputAck(msg.seq);
