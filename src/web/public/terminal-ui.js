@@ -680,9 +680,16 @@ Object.assign(CodemanApp.prototype, {
       let pixelAccum = 0;
 
       let didScroll = false; // track whether touchmove fired (tap vs scroll)
+      let touchStartX = 0;
       let touchStartY = 0;
       let tapStartedWithTerminalFocus = false;
       let tapStartIntentCache = null;
+      let selectionLongPressTimer = null;
+      let selectionTouchActive = false;
+      const cancelSelectionLongPress = () => {
+        if (selectionLongPressTimer) clearTimeout(selectionLongPressTimer);
+        selectionLongPressTimer = null;
+      };
       // px — ignore micro-drift to distinguish tap from scroll. Shared with the
       // keyboard-dismiss handler so both classify the same gesture the same way.
       const TAP_THRESHOLD = window.CodemanTerminalInput.MOBILE_KEYBOARD_DISMISS_TAP_SLOP;
@@ -690,8 +697,10 @@ Object.assign(CodemanApp.prototype, {
         'touchstart',
         (ev) => {
           if (ev.touches.length === 1) {
+            this._hideMobileTerminalSelectionMenu();
             touchLastX = ev.touches[0].clientX;
             touchLastY = ev.touches[0].clientY;
+            touchStartX = touchLastX;
             touchStartY = touchLastY;
             velocity = 0;
             pixelAccum = 0;
@@ -719,6 +728,18 @@ Object.assign(CodemanApp.prototype, {
               ev.preventDefault();
               this._blurMobileTerminalInput();
             }
+            cancelSelectionLongPress();
+            selectionTouchActive = false;
+            selectionLongPressTimer = setTimeout(() => {
+              selectionLongPressTimer = null;
+              if (!isTouching || didScroll) return;
+              selectionTouchActive = this._beginMobileTerminalSelection(touchLastX, touchLastY);
+              if (!selectionTouchActive) return;
+              didScroll = true;
+              velocity = 0;
+              this._blurMobileTerminalInput();
+              window.CodemanNative?.vibrateSelection?.().catch?.(() => {});
+            }, 500);
             lastTime = 0;
             if (scrollFrame) {
               cancelAnimationFrame(scrollFrame);
@@ -733,9 +754,20 @@ Object.assign(CodemanApp.prototype, {
         'touchmove',
         (ev) => {
           if (ev.touches.length === 1 && isTouching) {
+            if (selectionTouchActive) {
+              ev.preventDefault();
+              touchLastX = ev.touches[0].clientX;
+              touchLastY = ev.touches[0].clientY;
+              this._updateMobileTerminalSelection(touchLastX, touchLastY);
+              return;
+            }
             const touchY = ev.touches[0].clientY;
+            if (Math.abs(ev.touches[0].clientX - touchStartX) >= TAP_THRESHOLD) {
+              cancelSelectionLongPress();
+            }
             if (!didScroll && Math.abs(touchY - touchStartY) >= TAP_THRESHOLD) {
               didScroll = true;
+              cancelSelectionLongPress();
             }
             // Below the tap threshold, treat the gesture as a potential tap:
             // don't preventDefault (iOS needs click synthesis to show the
@@ -765,7 +797,16 @@ Object.assign(CodemanApp.prototype, {
       container.addEventListener(
         'touchend',
         (ev) => {
+          cancelSelectionLongPress();
           isTouching = false;
+          if (selectionTouchActive) {
+            const touch = ev.changedTouches && ev.changedTouches[0];
+            if (touch) this._showMobileTerminalSelectionMenu(touch.clientX, touch.clientY);
+            selectionTouchActive = false;
+            velocity = 0;
+            tapStartedWithTerminalFocus = false;
+            return;
+          }
           if (!scrollFrame && Math.abs(velocity) > 0.3) {
             scrollFrame = requestAnimationFrame(scrollLoop);
           }
@@ -790,7 +831,9 @@ Object.assign(CodemanApp.prototype, {
       container.addEventListener(
         'touchcancel',
         () => {
+          cancelSelectionLongPress();
           isTouching = false;
+          selectionTouchActive = false;
           velocity = 0;
           pixelAccum = 0;
           tapStartedWithTerminalFocus = false;
@@ -1401,7 +1444,7 @@ Object.assign(CodemanApp.prototype, {
             range: { start, end },
             decorations: { pointerCursor: true, underline: true },
             activate(_event, text) {
-              window.open(text, '_blank', 'noopener,noreferrer');
+              void self._openTerminalUrl(text);
             },
             hover() {
               self._linkHovered = true;
@@ -1512,6 +1555,73 @@ Object.assign(CodemanApp.prototype, {
     });
 
     console.log('[LinkProvider] File path link provider registered');
+  },
+
+  /**
+   * Open an HTTP(S) URL using the platform-native browser surface when the
+   * hosted UI is running inside Capacitor. On iOS, Capacitor Browser presents
+   * SFSafariViewController; Android uses a Custom Tab. Normal browsers retain
+   * the expected new-tab behavior.
+   */
+  async _openTerminalUrl(url) {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return false;
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+
+    if (window.CodemanNative?.isNative && typeof window.CodemanNative.openExternal === 'function') {
+      try {
+        await window.CodemanNative.openExternal(parsed.href);
+        return true;
+      } catch {
+        // A missing native plugin must not make links inert; fall back to the
+        // system browser/new tab below.
+      }
+    }
+    const opened = window.open(parsed.href, '_blank', 'noopener,noreferrer');
+    return opened !== null;
+  },
+
+  /** Return the URL occupying a touched terminal cell, including wrapped URLs. */
+  _terminalUrlAtPoint(clientX, clientY) {
+    const pos = this._clientPointToCell(clientX, clientY);
+    const buffer = this.terminal?.buffer?.active;
+    if (!pos || !buffer?.getLine) return null;
+
+    const cols = this.terminal.cols;
+    const touchedRow = buffer.viewportY + pos.row;
+    const rowAt = (row) => buffer.getLine(row - 1);
+    const continuesPrevious = (row) => {
+      if (row <= 1) return false;
+      if (rowAt(row)?.isWrapped) return true;
+      return (rowAt(row - 1)?.translateToString(true).length || 0) >= cols;
+    };
+    const maxRows = 12;
+    let startRow = touchedRow;
+    while (startRow > 1 && touchedRow - startRow < maxRows && continuesPrevious(startRow)) startRow--;
+    let endRow = touchedRow;
+    while (endRow < buffer.length && endRow - startRow < maxRows && continuesPrevious(endRow + 1)) endRow++;
+
+    const rows = [];
+    for (let row = startRow; row <= endRow; row++) {
+      const line = rowAt(row);
+      if (!line) break;
+      rows.push(line.translateToString(row === endRow));
+    }
+    if (!rows.length) return null;
+
+    const text = rows.join('');
+    const touchedIndex = rows.slice(0, touchedRow - startRow).reduce((sum, row) => sum + row.length, 0) + pos.col - 1;
+    const pattern = /https?:\/\/(?:[^\s"'<>|;&)\]\x00-\x1f]|&(?!&))+/g;
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const cleaned = match[0].replace(/[.,;:!?)&]+$/, '');
+      if (touchedIndex >= match.index && touchedIndex < match.index + cleaned.length) return cleaned;
+    }
+    return null;
   },
 
   showWelcome() {
@@ -3501,10 +3611,96 @@ Object.assign(CodemanApp.prototype, {
     return !ev.altKey && (ev.key || '').toLowerCase() === 'c';
   },
 
+  _terminalSelectionCellAtPoint(clientX, clientY) {
+    const pos = this._clientPointToCell(clientX, clientY);
+    const buffer = this.terminal?.buffer?.active;
+    if (!pos || !buffer) return null;
+    return {
+      col: Math.max(0, Math.min((this.terminal?.cols || 1) - 1, pos.col - 1)),
+      row: Math.max(0, buffer.viewportY + pos.row - 1),
+    };
+  },
+
+  _beginMobileTerminalSelection(clientX, clientY) {
+    const cell = this._terminalSelectionCellAtPoint(clientX, clientY);
+    const line = cell && this.terminal?.buffer?.active?.getLine(cell.row);
+    if (!cell || !line || typeof this.terminal.select !== 'function') return false;
+
+    const text = line.translateToString(false);
+    let start = Math.min(cell.col, Math.max(0, text.length - 1));
+    let end = start + 1;
+    if (text[start] && !/\s/.test(text[start])) {
+      while (start > 0 && !/\s/.test(text[start - 1])) start--;
+      while (end < text.length && !/\s/.test(text[end])) end++;
+    }
+
+    const cols = Math.max(1, this.terminal.cols || 1);
+    this._mobileSelectionAnchor = {
+      start: cell.row * cols + start,
+      end: cell.row * cols + Math.max(start + 1, end),
+    };
+    this._mobileSelectionRow = cell.row;
+    this.terminal.select(start, cell.row, Math.max(1, end - start));
+    return true;
+  },
+
+  _updateMobileTerminalSelection(clientX, clientY) {
+    const cell = this._terminalSelectionCellAtPoint(clientX, clientY);
+    const anchor = this._mobileSelectionAnchor;
+    if (!cell || !anchor || typeof this.terminal?.select !== 'function') return;
+    const cols = Math.max(1, this.terminal.cols || 1);
+    const current = cell.row * cols + cell.col;
+    const start = Math.min(anchor.start, current);
+    const end = Math.max(anchor.end, current + 1);
+    this._mobileSelectionRow = cell.row;
+    this.terminal.select(start % cols, Math.floor(start / cols), Math.max(1, end - start));
+  },
+
+  _showMobileTerminalSelectionMenu(clientX, clientY) {
+    if (!this.terminal?.hasSelection?.()) return;
+    this._hideMobileTerminalSelectionMenu();
+    const menu = document.createElement('div');
+    menu.className = 'terminal-selection-menu';
+    menu.setAttribute('role', 'toolbar');
+    menu.setAttribute('aria-label', 'Terminal text selection');
+    menu.innerHTML = `
+      <button type="button" data-action="copy">Copy</button>
+      <button type="button" data-action="line">Line</button>
+      <button type="button" data-action="cancel" title="Clear selection" aria-label="Clear selection">&times;</button>
+    `;
+    menu.addEventListener('click', (event) => {
+      const action = event.target?.closest?.('button')?.dataset?.action;
+      if (!action) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (action === 'copy') {
+        void this.copyTerminalSelection(undefined, { refocus: false });
+        this._hideMobileTerminalSelectionMenu();
+      } else if (action === 'line') {
+        const row = this._mobileSelectionRow;
+        if (Number.isInteger(row)) this.terminal.selectLines?.(row, row);
+      } else {
+        this.terminal.clearSelection?.();
+        this._hideMobileTerminalSelectionMenu();
+      }
+    });
+    document.body.appendChild(menu);
+    const width = menu.offsetWidth || 176;
+    const height = menu.offsetHeight || 42;
+    menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, clientX - width / 2))}px`;
+    menu.style.top = `${Math.max(8, Math.min(window.innerHeight - height - 8, clientY - height - 14))}px`;
+    this._mobileTerminalSelectionMenu = menu;
+  },
+
+  _hideMobileTerminalSelectionMenu() {
+    this._mobileTerminalSelectionMenu?.remove?.();
+    this._mobileTerminalSelectionMenu = null;
+  },
+
   // Copy the current terminal selection. Goes through _copyText (Clipboard API,
   // then a hidden-textarea + execCommand fallback) because install.sh's LAN
   // option serves plain HTTP, where navigator.clipboard is undefined.
-  async copyTerminalSelection(text) {
+  async copyTerminalSelection(text, options = {}) {
     const selection = text ?? (this.terminal.hasSelection?.() ? this.terminal.getSelection() : '');
     if (!selection) return false;
     const ok = await this._copyText(selection);
@@ -3518,7 +3714,7 @@ Object.assign(CodemanApp.prototype, {
     }
     // The execCommand fallback focuses a temp textarea, so hand focus back. This
     // is the CJK-aware focus router, not xterm's raw focus().
-    this.terminal.focus();
+    if (options.refocus !== false) this.terminal.focus();
     return ok;
   },
 
@@ -3822,6 +4018,14 @@ Object.assign(CodemanApp.prototype, {
     // A guard bail-out, not a classification: there is nothing to classify. It is
     // deliberately NOT 'history', which would claim the viewport was scrolled up.
     if (!touch || !this.terminal) return null;
+    const url = this._terminalUrlAtPoint(touch.clientX, touch.clientY);
+    if (url) {
+      this._blurMobileTerminalInput();
+      this.terminal.clearSelection?.();
+      void this._openTerminalUrl(url);
+      return 'link';
+    }
+    if (this.terminal.hasSelection?.()) this.terminal.clearSelection();
     // touchstart already classified this exact point; reuse it rather than paying
     // a second full-viewport scan for the same gesture.
     const intent = cachedIntent ?? this._classifyMobileTerminalTap(touch.clientX, touch.clientY);

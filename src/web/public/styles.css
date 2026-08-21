@@ -3485,6 +3485,37 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   -webkit-touch-callout: none !important;
 }
 
+.terminal-selection-menu {
+  position: fixed;
+  z-index: 10050;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 4px;
+  border: 1px solid var(--border-bright);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+  touch-action: manipulation;
+}
+
+.terminal-selection-menu button {
+  min-width: 44px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+}
+
+.terminal-selection-menu button:active,
+.terminal-selection-menu button:hover {
+  background: var(--bg-hover);
+}
+
 /* Welcome Overlay */
 .welcome-overlay {
   position: absolute;
