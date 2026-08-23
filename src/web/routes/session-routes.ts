@@ -47,6 +47,7 @@ import {
   SessionWaitOutputQuerySchema,
 } from '../schemas.js';
 import { mergeSessionOrder } from '../../session-order.js';
+import { parseTranscriptBlocks, TRANSCRIPT_DEFAULTS } from '../../transcript-blocks.js';
 import {
   sessionWaits,
   resolveWaitSignals,
@@ -1954,6 +1955,102 @@ export function registerSessionRoutes(
     }
   });
 
+  /**
+   * Read at most `maxBytes` from the END of a file, aligned to a line boundary.
+   *
+   * A transcript is unbounded — 12.5 MB measured on a real long-running session —
+   * and the view only ever shows the most recent stretch. Reading the whole file
+   * to discard 95% of it would stall the event loop on every poll.
+   */
+  /**
+   * How much of a transcript's tail one request may read. 1 MB covers well over a
+   * hundred blocks of real conversation while staying cheap enough to poll.
+   */
+  const TRANSCRIPT_BYTE_WINDOW = 1024 * 1024;
+
+  /** Parse a query-string integer, falling back on anything non-numeric. */
+  function clampInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+    const value = raw === undefined ? NaN : Number.parseInt(raw, 10);
+    if (!Number.isFinite(value)) return fallback;
+    return Math.min(Math.max(value, min), max);
+  }
+
+  async function readTail(path: string, maxBytes: number): Promise<string> {
+    const handle = await fs.open(path, 'r');
+    try {
+      const { size } = await handle.stat();
+      const length = Math.min(size, maxBytes);
+      const buffer = Buffer.allocUnsafe(length);
+      await handle.read(buffer, 0, length, size - length);
+      const text = buffer.toString('utf8');
+      if (length >= size) return text;
+      // The read almost certainly began mid-line; drop the partial head so the
+      // parser is never handed a fragment that happens to parse as valid JSON.
+      const newline = text.indexOf('\n');
+      return newline >= 0 ? text.slice(newline + 1) : '';
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /**
+   * `GET /api/sessions/:id/transcript` — the conversation as STRUCTURED blocks.
+   *
+   * Distinct from `last-response`, which flattens a turn to the agent's prose and
+   * drops reasoning, tool calls and edits (most of a modern turn). Backs the
+   * native client's transcript view; the web response viewer still uses
+   * `last-response` and is unaffected.
+   *
+   * ⚠️ Claude-mode only. Codex writes a different rollout format in
+   * `~/.codex/sessions`, and the tmux-backed CLIs write no transcript at all — so
+   * this answers 200 with `available:false` rather than an error, letting the UI
+   * say "no transcript for this session type" instead of showing a failure for a
+   * session that is working perfectly.
+   */
+  app.get('/api/sessions/:id/transcript', async (req) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+    const query = req.query as { limit?: string; maxBytes?: string };
+
+    if (session.mode !== 'claude') {
+      return { available: false, reason: `${session.mode} sessions do not write a Claude transcript`, blocks: [] };
+    }
+
+    const projectsDir = join(process.env.HOME || '/tmp', '.claude', 'projects');
+    // Same `/clear` adoption the response viewer does: without it the id stays
+    // pinned to the pre-clear conversation and the view shows a stale thread.
+    const activeId = await resolveActiveClaudeSessionIdFromHistory(session, projectsDir);
+    if (activeId && activeId !== session.claudeSessionId) {
+      session.adoptClaudeSessionId(activeId);
+      ctx.persistSessionState(session);
+    }
+
+    const transcript = await findClaudeTranscript(projectsDir, session.claudeSessionId || session.id, session.id);
+    if (!transcript) {
+      return { available: false, reason: 'No transcript file yet', blocks: [] };
+    }
+    if (transcript.sessionId !== session.claudeSessionId && transcript.sessionId !== session.id) {
+      session.adoptClaudeSessionId(transcript.sessionId);
+    }
+
+    const limit = clampInt(query.limit, TRANSCRIPT_DEFAULTS.maxBlocks, 1, 1000);
+    const maxBytes = clampInt(query.maxBytes, TRANSCRIPT_BYTE_WINDOW, 64 * 1024, 8 * 1024 * 1024);
+
+    try {
+      const content = await readTail(transcript.path, maxBytes);
+      const parsed = parseTranscriptBlocks(content, { maxBlocks: limit });
+      return {
+        available: true,
+        claudeSessionId: transcript.sessionId,
+        blocks: parsed.blocks,
+        truncated: parsed.truncated,
+        totalBlocks: parsed.totalBlocks,
+      };
+    } catch {
+      return { available: false, reason: 'Transcript could not be read', blocks: [] };
+    }
+  });
+
   function isCodexInjectedContext(text: string): boolean {
     return (
       /^# AGENTS\.md instructions\b/i.test(text) ||
@@ -2312,6 +2409,11 @@ export function registerSessionRoutes(
           )
         : null;
     const hasLiveMuxBuffer = liveMuxBuffer !== null && liveMuxBuffer.length > 0;
+    // Queried only when the body actually came from the pane; byte history has no
+    // single layout width, so reporting the pane's current size for it would be a
+    // claim the bytes don't support.
+    const paneSize =
+      hasLiveMuxBuffer && muxName && typeof ctx.mux.getPaneSize === 'function' ? ctx.mux.getPaneSize(muxName) : null;
     const source: 'history' | 'mux-visible' | 'mux-full-history' = hasLiveMuxBuffer
       ? isFullReload
         ? 'mux-full-history'
@@ -2424,6 +2526,16 @@ export function registerSessionRoutes(
       // what existed before the cut. The gap is what the indicator reports.
       retainedBytes: cleanBuffer.length,
       source,
+      // Geometry the capture was laid out at. A client that has just changed its
+      // own grid (rotation, font size) cannot otherwise tell whether this
+      // snapshot predates its resize — a `-J` full-history capture reports
+      // logical lines routinely wider than the pane, so the width is not
+      // recoverable from the bytes. Rendering a capture from a different width
+      // is what produces mid-word breaks and prompt-highlight overhang.
+      // Omitted (undefined) when the buffer came from byte history, which has
+      // no single layout width, or when the pane could not be queried.
+      paneCols: paneSize?.cols,
+      paneRows: paneSize?.rows,
     };
   });
 

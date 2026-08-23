@@ -144,6 +144,12 @@ export interface PaneCaptureOptions {
   maxCaptureBytes?: number;
 }
 
+/** Live geometry of a pane, in character cells. */
+export interface PaneSize {
+  cols: number;
+  rows: number;
+}
+
 /**
  * Terminal multiplexer interface.
  *
@@ -283,6 +289,18 @@ export interface TerminalMultiplexer extends EventEmitter {
    * Pass `{ fullHistory: true }` to capture the entire scrollback (COD-47).
    */
   captureActivePaneBuffer?(muxName: string, opts?: PaneCaptureOptions): string | null;
+
+  /**
+   * Current size of the session's active pane.
+   *
+   * ⚠️ A capture is laid out for the width it was taken at, and a full-history
+   * capture (`capture-pane -J`) reports *logical* lines that are routinely wider
+   * than the pane — so a client cannot infer the layout width from the bytes it
+   * receives. Without this, a client that has just resized has no way to tell
+   * whether the snapshot it got back predates its own resize, and renders a
+   * capture laid out for the old width into the new grid.
+   */
+  getPaneSize?(muxName: string): PaneSize | null;
 
   /**
    * Plain text of the visible frame: no styles, no cursor query, no repaint

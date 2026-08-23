@@ -836,6 +836,54 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer).toContain('byte history survives');
     });
 
+    // A capture is laid out for the width the pane had when tmux serialized it, and it does NOT
+    // reflow when written into a grid of another width. The width is not recoverable from the
+    // bytes either — `capture-pane -J` joins soft-wrapped rows, so its logical lines are routinely
+    // wider than the pane. Without the pane geometry in the response a client that has just
+    // resized (rotation, font-size change) cannot tell whether the snapshot predates its own
+    // resize, and renders a mis-laid capture: mid-word breaks and prompt-highlight overhang.
+    it('full reload reports the pane geometry the capture was laid out at', async () => {
+      harness.ctx._session.mode = 'claude';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        () => 'a joined logical line far wider than the pane it came from'
+      );
+      const sizeSpy = vi.fn(() => ({ cols: 63, rows: 49 }));
+      (harness.ctx.mux as { getPaneSize?: unknown }).getPaneSize = sizeSpy;
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(sizeSpy).toHaveBeenCalledWith(harness.ctx._session.muxName);
+      expect(body.data.paneCols).toBe(63);
+      expect(body.data.paneRows).toBe(49);
+    });
+
+    // Byte history is an accumulation across every width the pane has ever had, so it has no
+    // single layout width. Reporting the pane's CURRENT size for it would be a claim the bytes do
+    // not support, and a client would trust it.
+    it('omits the pane geometry when the body came from byte history, not the pane', async () => {
+      harness.ctx._session.mode = 'claude';
+      harness.ctx._session.terminalBuffer = 'byte history only';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() => null);
+      const sizeSpy = vi.fn(() => ({ cols: 63, rows: 49 }));
+      (harness.ctx.mux as { getPaneSize?: unknown }).getPaneSize = sizeSpy;
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.data.source).toBe('history');
+      expect(sizeSpy).not.toHaveBeenCalled();
+      expect(body.data.paneCols).toBeUndefined();
+    });
+
     it('full reload forwards the configured history-line limit and byte cap to the capture', async () => {
       harness.ctx.getTerminalHistoryConfig = vi.fn(async () => ({
         terminalScrollbackLines: 60_000,

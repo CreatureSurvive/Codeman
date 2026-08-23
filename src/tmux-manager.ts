@@ -90,6 +90,7 @@ import type {
   CreateSessionOptions,
   RespawnPaneOptions,
   PaneCaptureOptions,
+  PaneSize,
 } from './mux-interface.js';
 import {
   decideReconnect,
@@ -3297,6 +3298,34 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     } catch {
       // A dead/renamed pane is an ordinary outcome here, not an error worth logging
       // on a timer; the caller treats null as "no evidence either way".
+      return null;
+    }
+  }
+
+  /**
+   * Size of the session's active pane, for callers that must know the width a
+   * capture was laid out at.
+   *
+   * Deliberately a separate query rather than a field threaded through
+   * `capturePaneBuffer`: the full-history path returns early with raw
+   * scrollback, and widening its return type would ripple through every caller
+   * that only wants the bytes.
+   */
+  getPaneSize(muxName: string): PaneSize | null {
+    if (IS_TEST_MODE) return null;
+    const target = resolveTmuxPaneTarget(muxName);
+    if (!target) return null;
+    try {
+      const out = execSync(
+        `${this.tmux()} display-message -p -t ${shellescape(target)} '#{pane_width} #{pane_height}'`,
+        { encoding: 'utf-8', timeout: EXEC_TIMEOUT_MS }
+      ).trim();
+      const [cols, rows] = out.split(/\s+/).map((value) => parseInt(value, 10));
+      if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) return null;
+      return { cols, rows };
+    } catch {
+      // A dead or renamed pane is an ordinary outcome; the caller treats null as
+      // "no geometry available" and simply omits it from the response.
       return null;
     }
   }
