@@ -1,0 +1,179 @@
+name: CodemanNative
+
+options:
+  bundleIdPrefix: cloud.creature.codeman
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: false
+
+settings:
+  base:
+    # Team discovered from the existing Capacitor project in ios/App/App.xcodeproj.
+    # Do not change this — it is the account this repo already signs with.
+    DEVELOPMENT_TEAM: RUMWXF5QY3
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_UPCOMING_FEATURE_EXISTENTIAL_ANY: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    GCC_WARN_UNDECLARED_SELECTOR: YES
+    CLANG_WARN_DOCUMENTATION_COMMENTS: YES
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+
+packages:
+  libghostty-spm:
+    # Our fork of Lakr233/libghostty-spm. `1.4.0-codeman.N` is upstream 1.4.0 plus patches we
+    # carry; `upstream` is tracked as a git remote in that clone so they can be rebased forward.
+    #
+    # Carrying:
+    #  - per-surface font size survives a controller config push (upstream resets it, which reads
+    #    as "the font setting does not stick");
+    #  - tap-to-open-links, still inert — see GhosttyTerminalView.
+    url: https://github.com/CreatureSurvive/libghostty-spm.git
+    # Pinned exactly: this app feeds bytes into a host-managed InMemoryTerminalSession and hosts
+    # UITerminalView directly, so a minor-version API shift would be a silent behaviour change in
+    # the one component that must never drop or reorder output.
+    exactVersion: 1.4.0-codeman.3
+
+targets:
+  CodemanNative:
+    type: application
+    platform: iOS
+    supportedDestinations: [iOS, iPad]
+    sources:
+      - path: Sources
+    resources:
+      - path: Resources
+        optional: true
+    dependencies:
+      - package: libghostty-spm
+        product: GhosttyTerminal
+      - package: libghostty-spm
+        product: GhosttyTheme
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: Codeman
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: false
+        UIApplicationSupportsIndirectInputEvents: true
+        ITSAppUsesNonExemptEncryption: false
+        # Camera is requested only when the user taps "Take Photo" or "Scan QR".
+        # There is deliberately NO NSPhotoLibraryUsageDescription: PhotosPicker runs out of
+        # process, so the app never gets library-wide access and must not ask for it.
+        NSCameraUsageDescription: >-
+          Codeman uses the camera to scan a server's quick-connect QR code and to attach a photo
+          to a message.
+        # Narrow ATS: cleartext HTTP is permitted only to local/private addresses, which is what a
+        # default Codeman install serves over a LAN or VPN. Public HTTP stays blocked and
+        # NSAllowsArbitraryLoads is deliberately absent.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: >-
+          Codeman connects to your Codeman server on this network.
+        CFBundleURLTypes:
+          - CFBundleURLName: cloud.creature.codeman.native.connect
+            CFBundleTypeRole: Viewer
+            CFBundleURLSchemes:
+              - codeman
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cloud.creature.codeman.native
+        PRODUCT_NAME: Codeman
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_PREVIEWS: YES
+        SWIFT_EMIT_LOC_STRINGS: YES
+        # Warnings are errors in Release so a shipping build cannot carry them, while Debug keeps
+        # them visible without blocking an incremental edit-run cycle.
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
+      configs:
+        Release:
+          SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+          GCC_TREAT_WARNINGS_AS_ERRORS: YES
+
+  CodemanNativeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: CodemanNative
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cloud.creature.codeman.native.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "6.0"
+        # PRODUCT_NAME on the app target is `Codeman`, so the built product is `Codeman.app`.
+        # XcodeGen derives TEST_HOST from the *target* name, which would point at a
+        # `CodemanNative.app` that is never produced — set both explicitly.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Codeman.app/Codeman"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+  CodemanNativeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: CodemanNative
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cloud.creature.codeman.native.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "6.0"
+        TEST_TARGET_NAME: CodemanNative
+
+schemes:
+  CodemanNative:
+    build:
+      targets:
+        CodemanNative: all
+        CodemanNativeTests: [test]
+        CodemanNativeUITests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: true
+      # `TEST_RUNNER_<VAR>` only reaches an XCUITest *runner* process; a hosted unit-test bundle
+      # never sees it. Scheme environment variables do reach it, and `$(VAR)` expands from a build
+      # setting — so `xcodebuild … CODEMAN_TEST_URL=…` on the command line lands here.
+      # Empty by default, which is what makes the integration suite skip itself.
+      environmentVariables:
+        - variable: CODEMAN_TEST_URL
+          value: $(CODEMAN_TEST_URL)
+          isEnabled: true
+        - variable: CODEMAN_TEST_USERNAME
+          value: $(CODEMAN_TEST_USERNAME)
+          isEnabled: true
+        - variable: CODEMAN_TEST_PASSWORD
+          value: $(CODEMAN_TEST_PASSWORD)
+          isEnabled: true
+        # The session whose transcript the transcript UI test drives. Empty by default, so that
+        # test skips itself exactly like the rest of the live-server suite.
+        - variable: CODEMAN_TEST_TRANSCRIPT_SESSION
+          value: $(CODEMAN_TEST_TRANSCRIPT_SESSION)
+          isEnabled: true
+      targets:
+        - CodemanNativeTests
+        - CodemanNativeUITests
+    run:
+      config: Debug
+    archive:
+      config: Release

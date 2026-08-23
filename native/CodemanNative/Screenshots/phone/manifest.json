@@ -1,0 +1,89 @@
+[
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "619085D8-21A3-438F-AB36-CAEEB298639A",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "1C7953F3-C939-4095-AD37-C1F991375B91.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "09-terminal-landscape_0_89729F3D-57AE-482F-8D6D-5393A30B999C.png",
+        "timestamp" : 1787467913.275
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "619085D8-21A3-438F-AB36-CAEEB298639A",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "BCC19A34-66FF-4D08-8C7D-88DC66ABAF6E.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "08-terminal-with-output_0_69E3DB1E-EFEB-4D40-97DA-A1301957F81F.png",
+        "timestamp" : 1787467909.766
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "619085D8-21A3-438F-AB36-CAEEB298639A",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "4A75484E-00B0-482C-AB84-03462D4259CE.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "07-terminal_0_03CF403F-A7C2-4404-8FA1-61F8A52E48D0.png",
+        "timestamp" : 1787467901.044
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "619085D8-21A3-438F-AB36-CAEEB298639A",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "2152FB91-2CEB-467F-9071-401AF38C3E41.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "06-launch-configured_0_0BB8AA59-CE6A-453B-B6E6-DE1F46904F36.png",
+        "timestamp" : 1787467890.052
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "619085D8-21A3-438F-AB36-CAEEB298639A",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "DD9BBDD1-6AF5-497B-899C-465EE5F3AC35.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "05-launch-sheet_0_BA0FD090-052E-4E82-A1A4-48CE5B5E7CA9.png",
+        "timestamp" : 1787467879.988
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "619085D8-21A3-438F-AB36-CAEEB298639A",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "3953B0C7-DDC6-4235-BA3B-463152CAEB1F.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "04-workspace_0_600C7A72-B1B0-4D8E-A180-E546B85F17F7.png",
+        "timestamp" : 1787467875.845
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "619085D8-21A3-438F-AB36-CAEEB298639A",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "9AD001F6-C042-4897-932F-19B8CAD8B9D2.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "03-connection-tested_0_41F468D2-B6B8-4ACB-BB5D-C8F49F9DBD9F.png",
+        "timestamp" : 1787467840.753
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "619085D8-21A3-438F-AB36-CAEEB298639A",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "1BA7E1B7-F6F5-4DCE-ABDE-72F9EFC723A1.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "02-add-server_0_D798D47D-1B0A-41D0-A4FA-B593893DDB9D.png",
+        "timestamp" : 1787467838.158
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "619085D8-21A3-438F-AB36-CAEEB298639A",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "8830E0E3-A155-424B-8C9E-203168138DB6.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "01-onboarding_0_6FB19E65-D396-423A-924E-656BCFD2E9D0.png",
+        "timestamp" : 1787467830.814
+      }
+    ],
+    "testIdentifier" : "ScreenshotUITests/testCaptureFullFlow()",
+    "testIdentifierURL" : "test://com.apple.xcode/CodemanNative/CodemanNativeUITests/ScreenshotUITests/testCaptureFullFlow"
+  }
+]

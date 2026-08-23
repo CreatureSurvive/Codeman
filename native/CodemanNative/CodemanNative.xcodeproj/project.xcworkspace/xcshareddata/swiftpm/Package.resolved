@@ -1,0 +1,24 @@
+{
+  "originHash" : "afda0be2a4c29d9d1e9b9ed053ce96f8a54c4b8c8505cdf6a46a43225dfc2c70",
+  "pins" : [
+    {
+      "identity" : "libghostty-spm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/CreatureSurvive/libghostty-spm.git",
+      "state" : {
+        "revision" : "dec5201fd6d42a74db5688aede752921df28e13d",
+        "version" : "1.4.0-codeman.3"
+      }
+    },
+    {
+      "identity" : "msdisplaylink",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Lakr233/MSDisplayLink.git",
+      "state" : {
+        "revision" : "87eb0af130744c8cbe2e31b6e1a5bcd659f1c220",
+        "version" : "2.2.0"
+      }
+    }
+  ],
+  "version" : 3
+}
