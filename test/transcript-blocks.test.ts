@@ -231,8 +231,9 @@ describe('parseTranscriptBlocks', () => {
     expect(blocks.map((b) => (b as { text: string }).text)).toEqual(['a real prompt']);
   });
 
-  // A screenshot is megabytes of base64. It must never reach the wire.
-  it('reports an image attachment as a count and never forwards its payload', () => {
+  // A screenshot is megabytes of base64. It must never reach the wire — the block carries a
+  // reference the client can fetch on demand instead.
+  it('describes an image attachment by reference and never forwards its payload', () => {
     const { blocks } = parseTranscriptBlocks(
       jsonl(
         user('u1', [
@@ -241,7 +242,11 @@ describe('parseTranscriptBlocks', () => {
         ])
       )
     );
-    expect(blocks[0]).toMatchObject({ kind: 'user', text: 'look at this', imageCount: 1 });
+    expect(blocks[0]).toMatchObject({
+      kind: 'user',
+      text: 'look at this',
+      images: [{ ref: 'u1:1', mediaType: 'image/jpeg', bytes: 3750 }],
+    });
     expect(JSON.stringify(blocks)).not.toContain('AAAA');
   });
 
@@ -263,7 +268,7 @@ describe('parseTranscriptBlocks', () => {
     expect((blocks[0] as ToolCallBlock).result).toHaveLength(50);
   });
 
-  it('flattens a structured tool result and reduces image parts to a marker', () => {
+  it('flattens a structured tool result and keeps its images as references', () => {
     const { blocks } = parseTranscriptBlocks(
       jsonl(
         assistant('a1', [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }]),
@@ -279,7 +284,15 @@ describe('parseTranscriptBlocks', () => {
         ])
       )
     );
-    expect((blocks[0] as ToolCallBlock).result).toBe('line one\n[image]');
+    const tool = blocks[0] as ToolCallBlock;
+    expect(tool.result).toBe('line one');
+    // The screenshot a tool returned is renderable, so it survives as a reference rather than
+    // being flattened to a "[image]" placeholder the user cannot open.
+    // The ref addresses where the image PHYSICALLY sits — the user entry carrying the
+    // tool_result (`u1`), not the assistant entry that made the call — because that is what the
+    // image route walks to resolve it.
+    expect(tool.images).toEqual([{ ref: 'u1:0:1', bytes: 3000 }]);
+    expect(JSON.stringify(blocks)).not.toContain('BBBB');
   });
 
   it('merges an adjacent run of assistant paragraphs into one block', () => {

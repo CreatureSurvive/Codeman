@@ -56,7 +56,9 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommand[] = [
  * the title matters to a picker.
  */
 export function parseCommandDescription(head: string): string | undefined {
-  const text = head.replace(/^﻿/, '');
+  // \uFEFF as an escape, not the literal character: a raw BOM in source trips
+  // `no-irregular-whitespace` and is invisible in review.
+  const text = head.replace(/^\uFEFF/, '');
 
   // Documented format: YAML frontmatter with a description key.
   if (text.startsWith('---')) {

@@ -50,15 +50,34 @@ actor TranscriptParser {
     /// id; appending would show the same command twice, once permanently stuck at "running".
     ///
     /// - Returns: the merged snapshot, so the caller does not need a second hop to read it.
+    /// - Parameter olderPage: true when this is a page read from ABOVE what is already held, so
+    ///   its blocks belong at the front. A page fetched while scrolling up would otherwise be
+    ///   appended and the conversation would read out of order.
     @discardableResult
-    func ingest(_ response: TranscriptResponse) -> Snapshot {
-        availability = response.available ? .available : .unavailable(response.reason ?? "No transcript available")
-        truncated = response.truncated
-        totalBlocks = response.totalBlocks ?? response.blocks.count
+    func ingest(_ response: TranscriptResponse, olderPage: Bool = false) -> Snapshot {
+        // An older page says nothing about live availability, and letting it overwrite the flags
+        // would report the tail as truncated based on a historical window.
+        if !olderPage {
+            availability = response.available ? .available : .unavailable(response.reason ?? "No transcript available")
+            truncated = response.truncated
+            totalBlocks = response.totalBlocks ?? response.blocks.count
+        }
 
-        for block in response.blocks {
-            if byID.updateValue(block, forKey: block.id) == nil {
-                order.append(block.id)
+        if olderPage {
+            // Preserve the page's own order while placing all of it before what is already held.
+            let fresh = response.blocks.filter { byID[$0.id] == nil }
+            for block in response.blocks { byID[block.id] = block }
+            order.insert(contentsOf: fresh.map(\.id), at: 0)
+        } else {
+            // ⚠️ Accumulate; NEVER take the response as the whole conversation. A poll reads a
+            // fixed-size window of the END of the transcript, and that window slides forward as
+            // the file grows — so a block present in one poll can be absent from the next without
+            // having been deleted. Replacing the list with each response is what made user prompts
+            // vanish from the middle of a live conversation.
+            for block in response.blocks {
+                if byID.updateValue(block, forKey: block.id) == nil {
+                    order.append(block.id)
+                }
             }
         }
         return snapshot()

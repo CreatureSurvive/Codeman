@@ -221,6 +221,42 @@ export class MockSession extends EventEmitter {
   /** CLI mode */
   mode: string = 'claude';
 
+  /** Live model/effort observed from statusLine telemetry — mirrors Session's merge semantics. */
+  private observedModel = { model: '', modelId: '', effort: '', at: 0 };
+
+  /** Spawn-time effort soft default. */
+  configuredEffort: string | undefined;
+
+  get activeModelInfo(): { model: string; modelId: string; effort: string; at: number } {
+    return { ...this.observedModel };
+  }
+
+  /** ⚠️ Merges, never replaces — an absent key must leave a known-good value alone. */
+  applyModelObservation(info: { modelId?: string; modelDisplayName?: string; effortLevel?: string } | null): boolean {
+    if (!info) return false;
+    let changed = false;
+    if (info.modelId && info.modelId !== this.observedModel.modelId) {
+      this.observedModel.modelId = info.modelId;
+      changed = true;
+    }
+    if (info.modelDisplayName && info.modelDisplayName !== this.observedModel.model) {
+      this.observedModel.model = info.modelDisplayName;
+      changed = true;
+    }
+    if (info.effortLevel && info.effortLevel !== this.observedModel.effort) {
+      this.observedModel.effort = info.effortLevel;
+      changed = true;
+    }
+    this.observedModel.at = Date.now();
+    return changed;
+  }
+
+  setEffort(effort: string): void {
+    this.configuredEffort = effort;
+    this.observedModel.effort = effort;
+    this.observedModel.at = Date.now();
+  }
+
   /** Text output buffer (stripped of ANSI) */
   textOutput: string = '';
 

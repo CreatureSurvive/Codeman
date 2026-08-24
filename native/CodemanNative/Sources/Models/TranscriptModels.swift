@@ -22,8 +22,21 @@ enum TranscriptBlock: Identifiable, Sendable, Hashable {
         var timestamp: Date?
         var text: String
         var truncated: Bool
-        /// Images are reported as a count; the server never sends their base64 payload.
-        var imageCount: Int
+        /// Attached images, as references. The bytes are fetched on demand.
+        var images: [ImageRef]
+    }
+
+    /// A pointer to an image inside the transcript.
+    ///
+    /// ⚠️ Never the bytes. Claude stores images base64-inline and one screenshot is megabytes, so
+    /// the listing carries a reference and the view fetches it only when it is on screen.
+    struct ImageRef: Sendable, Hashable, Identifiable, Decodable {
+        var ref: String
+        var mediaType: String?
+        /// Decoded size, for sizing a placeholder before the fetch completes.
+        var bytes: Int?
+
+        var id: String { ref }
     }
 
     struct ThinkingBlock: Sendable, Hashable {
@@ -54,6 +67,8 @@ enum TranscriptBlock: Identifiable, Sendable, Hashable {
         var resultTruncated: Bool
         var resultLength: Int?
         var isError: Bool
+        /// Images the tool returned — a screenshot, a rendered chart.
+        var images: [ImageRef]
 
         var isRunning: Bool { result == nil && !isError }
     }
@@ -68,6 +83,9 @@ enum TranscriptBlock: Identifiable, Sendable, Hashable {
         var newText: String?
         var oldTruncated: Bool
         var newTruncated: Bool
+        /// Counted server-side before truncation, so the badge never under-reports a big change.
+        var addedLines: Int
+        var removedLines: Int
         var isError: Bool
         var result: String?
 
@@ -109,13 +127,17 @@ private extension KeyedDecodingContainer {
     func string(_ key: Key) -> String? { (try? decodeIfPresent(String.self, forKey: key)) ?? nil }
     func text(_ key: Key) -> String { string(key) ?? "" }
     func int(_ key: Key) -> Int? { (try? decodeIfPresent(Int.self, forKey: key)) ?? nil }
+    func images(_ key: Key) -> [TranscriptBlock.ImageRef] {
+        ((try? decodeIfPresent([TranscriptBlock.ImageRef].self, forKey: key)) ?? nil) ?? []
+    }
 }
 
 extension TranscriptBlock: Decodable {
     private enum CodingKeys: String, CodingKey {
         case id, kind, timestamp, text, truncated, imageCount
         case name, summary, input, inputTruncated, result, resultTruncated, resultLength, isError
-        case filePath, oldText, newText, oldTruncated, newTruncated
+        case filePath, oldText, newText, oldTruncated, newTruncated, addedLines, removedLines
+        case images
     }
 
     /// Thrown for a `kind` this build does not know; `TranscriptResponse` catches it and skips
@@ -138,7 +160,7 @@ extension TranscriptBlock: Decodable {
                 timestamp: timestamp,
                 text: c.text(.text),
                 truncated: truncated,
-                imageCount: c.int(.imageCount) ?? 0
+                images: c.images(.images)
             ))
         case "thinking":
             self = .thinking(.init(
@@ -165,7 +187,8 @@ extension TranscriptBlock: Decodable {
                 result: c.string(.result),
                 resultTruncated: c.flag(.resultTruncated),
                 resultLength: c.int(.resultLength),
-                isError: c.flag(.isError)
+                isError: c.flag(.isError),
+                images: c.images(.images)
             ))
         case "diff":
             self = .diff(.init(
@@ -177,6 +200,8 @@ extension TranscriptBlock: Decodable {
                 newText: c.string(.newText),
                 oldTruncated: c.flag(.oldTruncated),
                 newTruncated: c.flag(.newTruncated),
+                addedLines: c.int(.addedLines) ?? 0,
+                removedLines: c.int(.removedLines) ?? 0,
                 isError: c.flag(.isError),
                 result: c.string(.result)
             ))
@@ -214,9 +239,22 @@ struct TranscriptResponse: Decodable, Sendable {
     /// True when older blocks were dropped to satisfy `limit`.
     var truncated: Bool
     var totalBlocks: Int?
+    /// Byte offset this page began at. Pass it back as `before` to read the page above it.
+    var windowStart: Int?
+    /// False once the window reaches the start of the transcript.
+    var hasMore: Bool
+    /// Byte offset where a follow-up poll may resume — the end of the last COMPLETE line.
+    ///
+    /// ⚠️ Not the raw end of the window. A transcript is appended to while it is read, so a window
+    /// routinely ends mid-entry; resuming at the raw end would start partway through that entry
+    /// and lose it between two windows that each looked complete.
+    var windowEnd: Int?
+    /// True when the transcript outgrew the window since `since`, so this window does NOT continue
+    /// from it — the bytes between the cursor and `windowStart` are missing and need back-filling.
+    var gap: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case available, reason, blocks, truncated, totalBlocks
+        case available, reason, blocks, truncated, totalBlocks, windowStart, hasMore, windowEnd, gap
     }
 
     init(from decoder: any Decoder) throws {
@@ -225,6 +263,10 @@ struct TranscriptResponse: Decodable, Sendable {
         reason = c.string(.reason)
         truncated = c.flag(.truncated)
         totalBlocks = c.int(.totalBlocks)
+        windowStart = c.int(.windowStart)
+        hasMore = c.flag(.hasMore)
+        windowEnd = c.int(.windowEnd)
+        gap = c.flag(.gap)
 
         // ⚠️ Decode block-by-block so one unreadable entry costs one block, not the view. A
         // straight `[TranscriptBlock]` decode throws on the first unknown `kind` and the user

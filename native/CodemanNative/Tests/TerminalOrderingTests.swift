@@ -96,11 +96,31 @@ actor TestAPIClient: APIClientProtocol {
 
     /// These tests drive the terminal, not the transcript view; the endpoint is stubbed as
     /// "no transcript" so the double satisfies the protocol without pretending to serve one.
-    func transcript(id: String, limit: Int?, scope: NodeScope) async throws -> TranscriptResponse {
+    func transcript(id: String, limit: Int?, maxBytes: Int?, before: Int?, since: Int?, scope: NodeScope) async throws
+        -> TranscriptResponse {
         try JSONDecoder().decode(
             TranscriptResponse.self,
             from: Data(#"{"available":false,"reason":"stub","blocks":[]}"#.utf8)
         )
+    }
+
+    func transcriptImage(id: String, ref: String, scope: NodeScope) async throws -> Data { Data() }
+
+    func attachmentData(id: String, sessionID: String, scope: NodeScope) async throws -> Data { Data() }
+
+    func slashCommands(id: String, scope: NodeScope) async throws -> SlashCommandsResponse {
+        try JSONDecoder().decode(
+            SlashCommandsResponse.self,
+            from: Data(#"{"available":false,"commands":[]}"#.utf8)
+        )
+    }
+
+    func projectFiles(id: String, depth: Int, scope: NodeScope) async throws -> FileTreeResponse {
+        FileTreeResponse(root: "/tmp", tree: [], totalFiles: 0, totalDirectories: 0, truncated: false)
+    }
+
+    func fileContent(id: String, path: String, scope: NodeScope) async throws -> FileContent {
+        try JSONDecoder().decode(FileContent.self, from: Data(#"{"path":"\#(path)","content":""}"#.utf8))
     }
 
     func sendInput(_ request: SessionInputRequest, id: String, scope: NodeScope) async throws -> SessionInputResponse {

@@ -30,12 +30,28 @@ interface BlockBase {
   timestamp?: string;
 }
 
+/**
+ * A renderable image held in the transcript.
+ *
+ * ⚠️ Carries a REFERENCE, never the bytes. Claude stores images as base64 inline, and a single
+ * screenshot is megabytes — inlining even one would dwarf an entire conversation's worth of text.
+ * The client fetches `GET /api/sessions/:id/transcript/image?ref=…` when a view actually needs it,
+ * so an off-screen image costs nothing.
+ */
+export interface TranscriptImageRef {
+  /** `<entryUuid>:<blockIndex>` or `<entryUuid>:<blockIndex>:<contentIndex>` inside a tool result. */
+  ref: string;
+  mediaType?: string;
+  /** Decoded byte length, so the client can size a placeholder before fetching. */
+  bytes?: number;
+}
+
 export interface UserBlock extends BlockBase {
   kind: 'user';
   text: string;
   truncated?: boolean;
-  /** Count of image attachments on this message. The base64 payload is never included. */
-  imageCount?: number;
+  /** Images attached to this message, as references. */
+  images?: TranscriptImageRef[];
 }
 
 export interface ThinkingBlock extends BlockBase {
@@ -71,6 +87,8 @@ export interface ToolCallBlock extends BlockBase {
   /** Total result length before capping, so the UI can say how much it is hiding. */
   resultLength?: number;
   isError?: boolean;
+  /** Images the tool returned (a screenshot, a rendered chart), as references. */
+  images?: TranscriptImageRef[];
 }
 
 export interface DiffBlock extends BlockBase {
@@ -83,6 +101,12 @@ export interface DiffBlock extends BlockBase {
   newText?: string;
   oldTruncated?: boolean;
   newTruncated?: boolean;
+  /**
+   * Line counts for the `+N -N` badge, computed BEFORE the text is capped — a truncated diff
+   * would otherwise under-report the size of the change it is truncating.
+   */
+  addedLines?: number;
+  removedLines?: number;
   isError?: boolean;
   /** Error text when the edit failed; a successful edit's result is uninteresting. */
   result?: string;
@@ -176,17 +200,36 @@ function firstString(input: Record<string, unknown>, keys: string[]): string | u
  * multi-megabyte base64 string; forwarding it would dwarf the rest of the
  * response and the client cannot render it from this endpoint anyway.
  */
-function flattenResultContent(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
+function flattenResultContent(content: unknown, imageBase: string): { text: string; images: TranscriptImageRef[] } {
+  if (typeof content === 'string') return { text: content, images: [] };
+  if (!Array.isArray(content)) return { text: '', images: [] };
   const parts: string[] = [];
-  for (const raw of content) {
-    if (!raw || typeof raw !== 'object') continue;
+  const images: TranscriptImageRef[] = [];
+  content.forEach((raw, index) => {
+    if (!raw || typeof raw !== 'object') return;
     const block = raw as RawBlock;
     if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text);
-    else if (block.type === 'image') parts.push('[image]');
-  }
-  return parts.join('\n');
+    else if (block.type === 'image') images.push(describeImage(block, `${imageBase}:${index}`));
+  });
+  return { text: parts.join('\n'), images };
+}
+
+/** Turn an image block into a reference, reading only its metadata — never its data. */
+function describeImage(block: RawBlock, ref: string): TranscriptImageRef {
+  const source = (block as { source?: { media_type?: string; data?: string } }).source;
+  const data = typeof source?.data === 'string' ? source.data : '';
+  return {
+    ref,
+    ...(source?.media_type ? { mediaType: source.media_type } : {}),
+    // base64 is 4 chars per 3 bytes; exact enough to size a placeholder.
+    ...(data ? { bytes: Math.floor((data.length * 3) / 4) } : {}),
+  };
+}
+
+/** Lines a diff side spans, for the `+N -N` badge. */
+function lineCount(text: string | undefined): number {
+  if (!text) return 0;
+  return text.split('\n').length;
 }
 
 /** One-line summary of a tool invocation, so a collapsed accordion is still readable. */
@@ -299,7 +342,7 @@ export function parseTranscriptBlocks(content: string, options: ParseTranscriptO
 
     if (!Array.isArray(content_)) continue;
 
-    let imageCount = 0;
+    const entryImages: TranscriptImageRef[] = [];
     content_.forEach((raw, index) => {
       if (!raw || typeof raw !== 'object') return;
       const block = raw as RawBlock;
@@ -353,7 +396,7 @@ export function parseTranscriptBlocks(content: string, options: ParseTranscriptO
         }
 
         case 'image': {
-          imageCount += 1;
+          entryImages.push(describeImage(block, id));
           return;
         }
 
@@ -364,6 +407,8 @@ export function parseTranscriptBlocks(content: string, options: ParseTranscriptO
           if (diff) {
             const oldCap = diff.old === undefined ? undefined : cap(diff.old, maxDiffChars);
             const newCap = cap(diff.next, maxDiffChars);
+            const removedLines = lineCount(diff.old);
+            const addedLines = lineCount(diff.next);
             const made: DiffBlock = {
               id,
               kind: 'diff',
@@ -374,6 +419,8 @@ export function parseTranscriptBlocks(content: string, options: ParseTranscriptO
               newText: newCap.text,
               ...(oldCap?.truncated ? { oldTruncated: true } : {}),
               ...(newCap.truncated ? { newTruncated: true } : {}),
+              ...(addedLines ? { addedLines } : {}),
+              ...(removedLines ? { removedLines } : {}),
             };
             blocks.push(made);
             if (block.id) pendingTools.set(block.id, made);
@@ -403,9 +450,11 @@ export function parseTranscriptBlocks(content: string, options: ParseTranscriptO
         case 'tool_result': {
           const target = block.tool_use_id ? pendingTools.get(block.tool_use_id) : undefined;
           if (!target) return;
-          const text = flattenResultContent(block.content);
+          const flattened = flattenResultContent(block.content, id);
+          const text = flattened.text;
           const capped = cap(text, maxResultChars);
           if (block.is_error) target.isError = true;
+          if (flattened.images.length && target.kind === 'toolCall') target.images = flattened.images;
           // A successful edit's result is boilerplate ("the file has been updated"),
           // and the diff above already shows what changed. A FAILED one is the only
           // thing worth the space, so it is the only one kept.
@@ -425,14 +474,14 @@ export function parseTranscriptBlocks(content: string, options: ParseTranscriptO
       }
     });
 
-    if (imageCount > 0) {
+    if (entryImages.length > 0) {
       // Attach to the user block this entry just produced, or stand alone when the
       // message was images only.
       const last = blocks.at(-1);
       if (last?.kind === 'user' && last.id.startsWith(`${uuid}:`)) {
-        last.imageCount = imageCount;
+        last.images = entryImages;
       } else {
-        blocks.push({ id: `${uuid}:img`, kind: 'user', timestamp, text: '', imageCount });
+        blocks.push({ id: `${uuid}:img`, kind: 'user', timestamp, text: '', images: entryImages });
       }
     }
   }

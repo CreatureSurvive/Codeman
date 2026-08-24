@@ -23,7 +23,12 @@ protocol APIClientProtocol: Sendable {
     func sendNewlineKey(id: String, scope: NodeScope) async throws
     func resize(_ request: ResizeRequest, id: String, scope: NodeScope) async throws
     func terminalSnapshot(id: String, full: Bool, tailBytes: Int?, scope: NodeScope) async throws -> TerminalSnapshot
-    func transcript(id: String, limit: Int?, scope: NodeScope) async throws -> TranscriptResponse
+    func transcript(id: String, limit: Int?, maxBytes: Int?, before: Int?, since: Int?, scope: NodeScope) async throws
+        -> TranscriptResponse
+    func transcriptImage(id: String, ref: String, scope: NodeScope) async throws -> Data
+    func projectFiles(id: String, depth: Int, scope: NodeScope) async throws -> FileTreeResponse
+    func slashCommands(id: String, scope: NodeScope) async throws -> SlashCommandsResponse
+    func fileContent(id: String, path: String, scope: NodeScope) async throws -> FileContent
     func historySessions(scope: NodeScope) async throws -> [HistorySession]
 
     func listCases(scope: NodeScope) async throws -> [CaseInfo]
@@ -31,6 +36,7 @@ protocol APIClientProtocol: Sendable {
     func browse(path: String?, sessionID: String?, showHidden: Bool, scope: NodeScope) async throws -> FilesystemListing
 
     func uploadImage(_ data: Data, filename: String, mimeType: String, sessionID: String, scope: NodeScope) async throws -> PasteImageResponse
+    func attachmentData(id: String, sessionID: String, scope: NodeScope) async throws -> Data
     func registerAttachment(path: String, notify: Bool, sessionID: String, scope: NodeScope) async throws -> AttachmentDescriptor
 
     func settings(scope: NodeScope) async throws -> ServerSettings
@@ -257,10 +263,53 @@ actor APIClient: APIClientProtocol {
     /// Claude Code writes, so reasoning, tool calls and file edits arrive as data rather than as
     /// pixels in a grid. Answers `available:false` rather than an error for a session type that
     /// writes no Claude transcript.
-    func transcript(id: String, limit: Int?, scope: NodeScope) async throws -> TranscriptResponse {
+    func transcript(
+        id: String,
+        limit: Int?,
+        maxBytes: Int?,
+        before: Int?,
+        since: Int?,
+        scope: NodeScope
+    ) async throws -> TranscriptResponse {
         var query: [URLQueryItem] = []
         if let limit { query.append(URLQueryItem(name: "limit", value: String(limit))) }
+        if let maxBytes { query.append(URLQueryItem(name: "maxBytes", value: String(maxBytes))) }
+        if let before { query.append(URLQueryItem(name: "before", value: String(before))) }
+        if let since { query.append(URLQueryItem(name: "since", value: String(since))) }
         return try await perform("GET", "/api/sessions/\(Self.escape(id))/transcript", scope: scope, query: query)
+    }
+
+    /// Bytes for one `TranscriptImageRef`.
+    ///
+    /// Returns raw data rather than an envelope — the endpoint answers with the image itself, so
+    /// there is no `{success,data}` wrapper to unwrap.
+    func transcriptImage(id: String, ref: String, scope: NodeScope) async throws -> Data {
+        let url = try makeURL("/api/sessions/\(Self.escape(id))/transcript/image", scope: scope,
+                              query: [URLQueryItem(name: "ref", value: ref)])
+        var request = await authorizedRequest(url: url, method: "GET")
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        let (data, response) = try await send(request)
+        try Self.throwIfFailure(response: response, data: data, decoder: decoder)
+        return data
+    }
+
+    /// The session's project file tree. Server-scoped to the working directory, with generated
+    /// trees already excluded.
+    func projectFiles(id: String, depth: Int, scope: NodeScope) async throws -> FileTreeResponse {
+        try await perform("GET", "/api/sessions/\(Self.escape(id))/files", scope: scope,
+                          query: [URLQueryItem(name: "depth", value: String(depth))])
+    }
+
+    /// One file's contents for preview. ⚠️ Truncates at 500 lines — never treat the result as the
+    /// whole file.
+    func fileContent(id: String, path: String, scope: NodeScope) async throws -> FileContent {
+        try await perform("GET", "/api/sessions/\(Self.escape(id))/file-content", scope: scope,
+                          query: [URLQueryItem(name: "path", value: path)])
+    }
+
+    /// Slash commands available to this session — the user's own files plus the CLI built-ins.
+    func slashCommands(id: String, scope: NodeScope) async throws -> SlashCommandsResponse {
+        try await perform("GET", "/api/sessions/\(Self.escape(id))/slash-commands", scope: scope)
     }
 
     func historySessions(scope: NodeScope) async throws -> [HistorySession] {
@@ -317,6 +366,22 @@ actor APIClient: APIClientProtocol {
         let (responseData, response) = try await send(request)
         try Self.throwIfFailure(response: response, data: responseData, decoder: decoder)
         return try APIEnvelope.decode(PasteImageResponse.self, from: responseData, decoder: decoder)
+    }
+
+    /// Bytes of a registered attachment.
+    ///
+    /// The `/raw` route streams the real file and is range-aware; it returns the image itself, so
+    /// there is no envelope to unwrap.
+    func attachmentData(id: String, sessionID: String, scope: NodeScope) async throws -> Data {
+        let url = try makeURL(
+            "/api/sessions/\(Self.escape(sessionID))/attachments/\(Self.escape(id))/raw",
+            scope: scope
+        )
+        var request = await authorizedRequest(url: url, method: "GET")
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        let (data, response) = try await send(request)
+        try Self.throwIfFailure(response: response, data: data, decoder: decoder)
+        return data
     }
 
     func registerAttachment(path: String, notify: Bool, sessionID: String, scope: NodeScope) async throws -> AttachmentDescriptor {

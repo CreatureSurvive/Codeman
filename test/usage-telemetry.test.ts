@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   parseStatusTelemetry,
   parseSessionStatus,
+  parseSessionModelInfo,
   formatSessionStatusText,
   telemetrySignature,
   type RawStatuslinePayload,
@@ -158,5 +159,48 @@ describe('telemetrySignature', () => {
     const a = parseStatusTelemetry({ ...base, cost: { total_cost_usd: 0.01 }, model: { display_name: 'A' } })!;
     const b = parseStatusTelemetry({ ...base, cost: { total_cost_usd: 9.99 }, model: { display_name: 'B' } })!;
     expect(telemetrySignature(a)).toBe(telemetrySignature(b));
+  });
+});
+
+describe('parseSessionModelInfo', () => {
+  // Shape read out of the CC 2.1.241 binary itself: the statusline payload builder emits
+  // `model:{id,display_name}` unconditionally and `...supportsEffort(model) && {effort:{level}}`.
+  const REAL_241: RawStatuslinePayload = {
+    ...REAL,
+    model: { id: 'claude-opus-4-5-20251101', display_name: 'Opus 4.5' },
+    effort: { level: 'high' },
+  };
+
+  it('reads model id, display name and effort off a real payload', () => {
+    expect(parseSessionModelInfo(REAL_241)).toEqual({
+      modelId: 'claude-opus-4-5-20251101',
+      modelDisplayName: 'Opus 4.5',
+      effortLevel: 'high',
+    });
+  });
+
+  // ⚠️ The CLI omits `effort` entirely for a model with no effort dial — that is not the same as
+  // "effort is unset", and treating it as a value would blank a control the UI is showing.
+  it('omits effort when the payload has none, without discarding the model', () => {
+    expect(parseSessionModelInfo(REAL)).toEqual({ modelDisplayName: 'Opus 4.8 (1M context)' });
+  });
+
+  // A level the UI cannot render is worse than the last known-good one, so an unknown value is
+  // dropped rather than stored. `auto` in particular is an INPUT to /effort, never a reading.
+  it('ignores an unrecognized effort level', () => {
+    expect(parseSessionModelInfo({ model: { id: 'x' }, effort: { level: 'auto' } })).toEqual({ modelId: 'x' });
+    expect(parseSessionModelInfo({ model: { id: 'x' }, effort: { level: 'turbo' } })).toEqual({ modelId: 'x' });
+  });
+
+  it('returns null when there is nothing to record', () => {
+    expect(parseSessionModelInfo(undefined)).toBeNull();
+    expect(parseSessionModelInfo({})).toBeNull();
+    expect(parseSessionModelInfo({ model: { display_name: '' } })).toBeNull();
+  });
+
+  it('bounds the strings it stores', () => {
+    const info = parseSessionModelInfo({ model: { id: 'x'.repeat(200), display_name: 'y'.repeat(200) } })!;
+    expect(info.modelId!.length).toBe(80);
+    expect(info.modelDisplayName!.length).toBe(60);
   });
 });

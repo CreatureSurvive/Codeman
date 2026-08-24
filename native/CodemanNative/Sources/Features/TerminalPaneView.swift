@@ -31,6 +31,7 @@ struct TerminalPaneView: View {
 
     private enum Presentation: Identifiable {
         case attachmentSources
+        case projectFiles
         case link(URL)
         case sessionSettings
         case selection(TerminalSelectionPayload)
@@ -39,6 +40,7 @@ struct TerminalPaneView: View {
             switch self {
             case .attachmentSources: "attach"
             case let .link(url): url.absoluteString
+            case .projectFiles: "files"
             case .sessionSettings: "settings"
             case let .selection(payload): "selection-\(payload.id)"
             }
@@ -94,6 +96,8 @@ struct TerminalPaneView: View {
                 .presentationDetents([.height(260)])
             case let .link(url):
                 SafariView(url: url).ignoresSafeArea()
+            case .projectFiles:
+                ProjectFilesView(sessionID: sessionID)
             case .sessionSettings:
                 NavigationStack { SessionSettingsView(sessionID: sessionID) }
             case let .selection(payload):
@@ -166,6 +170,9 @@ struct TerminalPaneView: View {
                     Divider()
                     terminalActions
                     Divider()
+                    Button("Project Files", systemImage: "folder") { presented = .projectFiles }
+                        .accessibilityIdentifier("terminal.projectFiles")
+
                     Button("Session Settings", systemImage: "slider.horizontal.3") {
                         presented = .sessionSettings
                     }
@@ -260,6 +267,9 @@ struct TerminalPaneView: View {
                 Divider()
                 terminalActions
                 Divider()
+                Button("Project Files", systemImage: "folder") { presented = .projectFiles }
+                    .accessibilityIdentifier("terminal.projectFiles")
+
                 Button("Session Settings", systemImage: "slider.horizontal.3") {
                     presented = .sessionSettings
                 }

@@ -23,6 +23,8 @@ import {
   type GeminiConfig,
   type AntigravityConfig,
   type PiConfig,
+  EFFORT_LEVELS,
+  isEffortLevel,
 } from '../../types.js';
 import { Session, isAltScreenStripMode, isMuxAltScreenOnlyStripMode } from '../../session.js';
 import { SseEvent } from '../sse-events.js';
@@ -45,6 +47,8 @@ import {
   SessionOrderUpdateSchema,
   SessionWaitQuerySchema,
   SessionWaitOutputQuerySchema,
+  SessionModelSchema,
+  SessionEffortSchema,
 } from '../schemas.js';
 import { mergeSessionOrder } from '../../session-order.js';
 import { parseTranscriptBlocks, TRANSCRIPT_DEFAULTS } from '../../transcript-blocks.js';
@@ -2019,6 +2023,66 @@ export function registerSessionRoutes(
   }
 
   /**
+   * Byte offset just past the last COMPLETE line of a window — where the next read may safely
+   * resume.
+   *
+   * ⚠️ Not the same as the window's `end`. A transcript is being appended to while we read it, so
+   * a window routinely ends mid-line; the parser skips that fragment (it does not parse), and a
+   * follow-up read starting at `end` would begin with the REST of that same line, which does not
+   * parse either. The entry would be silently lost between two windows that each looked complete.
+   * Resuming at a line boundary is what makes `since` safe.
+   */
+  function lastCompleteLineOffset(text: string, start: number): number {
+    const newline = text.lastIndexOf('\n');
+    if (newline < 0) return start;
+    return start + Buffer.byteLength(text.slice(0, newline + 1), 'utf8');
+  }
+
+  /**
+   * Read FORWARD from a byte offset — the incremental poll.
+   *
+   * ⚠️ This exists because a tail read cannot express "what happened since I last looked", and
+   * that gap is a real, measured bug rather than a theoretical one. A poll window is 1 MB, and on
+   * a real transcript that is often not one prompt: measured across this machine's six most recent
+   * transcripts, the 1 MB tail of a 37 MB session contained 130 blocks and **zero** user prompts,
+   * because tool results dominate the bytes. So whenever the client stopped polling for a few
+   * minutes of active work — backgrounded on iOS, most obviously — the next tail window began
+   * AFTER prompts the user had sent, those prompts were never in any window the client saw, and
+   * paging could not reach them either (it walks upward from the FIRST window, never into a hole
+   * that opened at the tail). The symptom was exactly what it should be: prompts sent from another
+   * client never appeared, while the processing they triggered did.
+   *
+   * When the delta fits, the caller gets it whole and there is no hole to reason about. When the
+   * agent has outrun the client, the newest window is returned with `gap: true` and a
+   * `windowStart` that names precisely where the hole ends, so the client can back-fill through
+   * the existing `before` paging instead of silently missing the middle.
+   */
+  async function readForward(
+    path: string,
+    since: number,
+    maxBytes: number
+  ): Promise<{ text: string; start: number; end: number; gap: boolean }> {
+    const handle = await fs.open(path, 'r');
+    let size: number;
+    try {
+      ({ size } = await handle.stat());
+      // Nothing new. Also covers a `since` past EOF, which a truncated/rotated file can produce.
+      if (since >= size) return { text: '', start: Math.min(since, size), end: size, gap: false };
+      if (size - since <= maxBytes) {
+        const length = size - since;
+        const buffer = Buffer.allocUnsafe(length);
+        await handle.read(buffer, 0, length, since);
+        return { text: buffer.toString('utf8'), start: since, end: size, gap: false };
+      }
+    } finally {
+      await handle.close();
+    }
+    // Outrun: hand back the live tail and say so, rather than lagging further behind every poll.
+    const tail = await readTail(path, maxBytes);
+    return { ...tail, gap: true };
+  }
+
+  /**
    * `GET /api/sessions/:id/transcript` — the conversation as STRUCTURED blocks.
    *
    * Distinct from `last-response`, which flattens a turn to the agent's prose and
@@ -2035,7 +2099,7 @@ export function registerSessionRoutes(
   app.get('/api/sessions/:id/transcript', async (req) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id, req);
-    const query = req.query as { limit?: string; maxBytes?: string; before?: string };
+    const query = req.query as { limit?: string; maxBytes?: string; before?: string; since?: string };
 
     if (session.mode !== 'claude') {
       return { available: false, reason: `${session.mode} sessions do not write a Claude transcript`, blocks: [] };
@@ -2062,9 +2126,18 @@ export function registerSessionRoutes(
     const maxBytes = clampInt(query.maxBytes, TRANSCRIPT_BYTE_WINDOW, 64 * 1024, 8 * 1024 * 1024);
     // `before` is the previous page's `windowStart`: read the window that ENDS there.
     const before = query.before === undefined ? undefined : clampInt(query.before, 0, 0, Number.MAX_SAFE_INTEGER);
+    // `since` is the previous poll's `windowEnd`: read FORWARD from there. Ignored while paging
+    // backwards, which is a different question ("what came before this?") asked of the same file.
+    const since =
+      before !== undefined || query.since === undefined
+        ? undefined
+        : clampInt(query.since, 0, 0, Number.MAX_SAFE_INTEGER);
 
     try {
-      const window = await readTail(transcript.path, maxBytes, before);
+      const window =
+        since === undefined
+          ? { ...(await readTail(transcript.path, maxBytes, before)), gap: false }
+          : await readForward(transcript.path, since, maxBytes);
       const parsed = parseTranscriptBlocks(window.text, { maxBlocks: limit });
       return {
         available: true,
@@ -2076,6 +2149,13 @@ export function registerSessionRoutes(
         // `hasMore` is false once the window reaches the start of the file.
         windowStart: window.start,
         hasMore: window.start > 0,
+        // Where a follow-up poll may resume — the end of the last COMPLETE line, never the raw
+        // window end, so an entry split across two windows is not lost between them.
+        windowEnd: lastCompleteLineOffset(window.text, window.start),
+        // True when the transcript grew past `maxBytes` since `since`, so this window does NOT
+        // continue from it. The bytes between `since` and `windowStart` are missing and can be
+        // back-filled with `before=<windowStart>`.
+        gap: window.gap,
       };
     } catch {
       return { available: false, reason: 'Transcript could not be read', blocks: [] };
@@ -2270,6 +2350,141 @@ export function registerSessionRoutes(
     const userCommands = await readCommandDirectory(join(process.env.HOME || '/tmp', '.claude', 'commands'), 'user');
 
     return { available: true, commands: mergeSlashCommands(projectCommands, userCommands) };
+  });
+
+  // ── Live model + effort ─────────────────────────────────────────────────────────────────
+  //
+  // Claude reports both on every statusLine render, and Codeman's exporter already POSTs that
+  // blob to /api/status-telemetry — so reading them costs nothing and needs no pane interaction.
+  // WRITING them is a different matter: there is no API, so the only way to change either is to
+  // type the CLI's own slash command into the pane, exactly as a human would.
+
+  /** `/effort` also accepts `auto` (let the CLI pick), which is an input, never a reported level. */
+  const EFFORT_ARGUMENTS = [...EFFORT_LEVELS, 'auto'] as readonly string[];
+
+  /**
+   * Model names Codeman will type into a pane.
+   *
+   * ⚠️ An allowlist, not a sanitizer. The value is typed into Claude's composer, so a newline
+   * would submit the line early and leave the rest sitting as a prompt — the charset makes that
+   * unrepresentable rather than relying on a strip. Covers aliases (`opus`), full ids
+   * (`claude-opus-4-5-20251101`) and Codeman's 1M-context suffix (`…[1m]`).
+   */
+  const MODEL_NAME_PATTERN = /^[A-Za-z0-9._:[\]-]{1,80}$/;
+
+  /** Shared preamble: these are Claude Code commands, so they mean nothing to the other CLIs. */
+  function requireClaudeSession(session: Session, reply: FastifyReply): boolean {
+    if (session.mode === 'claude') return true;
+    reply
+      .code(400)
+      .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, `${session.mode} sessions have no /model or /effort`));
+    return false;
+  }
+
+  /**
+   * `GET /api/sessions/:id/model` — the session's LIVE model and effort.
+   *
+   * ⚠️ Reports `pending: true` rather than guessing when nothing has been observed yet, and
+   * installs the statusLine exporter on the way out so the next render starts feeding. That
+   * install is the same add-only, `isOurs`-guarded call the settings PUT makes, so it can never
+   * clobber a user's own statusLine — and without it a session whose workspace has no exporter
+   * would report `pending` forever with no way for the client to fix it.
+   */
+  app.get('/api/sessions/:id/model', async (req) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+
+    if (session.mode !== 'claude') {
+      return { available: false, reason: `${session.mode} sessions have no Claude model or effort`, pending: false };
+    }
+
+    const info = session.activeModelInfo;
+
+    // Never observed → make sure the feed exists. Skipped for remote/docker cases, where
+    // workingDir is a pseudo-path and the mkdir inside would create a junk local directory
+    // (same guard as session create, 499d355).
+    const pending = info.at === 0;
+    if (pending && session.workingDir && !session.remote && !session.docker) {
+      await applyStatusLineConfig(session.workingDir, true).catch(() => {});
+    }
+
+    return {
+      available: true,
+      pending,
+      model: info.model || undefined,
+      modelId: info.modelId || undefined,
+      /** The live level. Empty for a model with no effort dial — see `effortSupported`. */
+      effort: info.effort || undefined,
+      /**
+       * The spawn-time soft default. Differs from `effort` exactly when the user has switched
+       * in-session, which is the case the native client needs to show honestly.
+       */
+      configuredEffort: session.configuredEffort,
+      /** false = this model has no effort dial, so hide the control rather than disabling it. */
+      effortSupported: info.at > 0 ? info.effort !== '' : undefined,
+      observedAt: info.at || undefined,
+      effortOptions: EFFORT_ARGUMENTS,
+    };
+  });
+
+  /**
+   * `POST /api/sessions/:id/model` — switch the model by typing `/model <name>`.
+   *
+   * ⚠️ This is a keystroke, not a write to state. Two consequences the caller must live with:
+   * the command lands in the composer, so it QUEUES behind a turn already in flight rather than
+   * taking effect at once; and confirmation arrives only on the next statusLine render, as a
+   * `session:modelInfo` broadcast. The response therefore reports `confirmPending`, never a new
+   * model — claiming a switch we have not observed would be a lie the UI then displays.
+   */
+  app.post('/api/sessions/:id/model', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+    if (!requireClaudeSession(session, reply)) return reply;
+
+    const { model } = parseBody(SessionModelSchema, req.body);
+    if (!MODEL_NAME_PATTERN.test(model)) {
+      return reply
+        .code(400)
+        .send(createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Model name has unsupported characters'));
+    }
+
+    const delivered = await session.writeViaMux(`/model ${model}\r`);
+    if (!delivered) {
+      return reply
+        .code(503)
+        .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Could not deliver /model to the session'));
+    }
+    return { sent: true, command: `/model ${model}`, confirmPending: true };
+  });
+
+  /**
+   * `POST /api/sessions/:id/effort` — switch effort by typing `/effort <level>`.
+   *
+   * Unlike an observation this ALSO rewrites the session's spawn-time effort (`setEffort`), so a
+   * respawn relaunches at the level the user asked for instead of reverting. An explicit request
+   * is a durable preference; a statusline reading is not.
+   *
+   * ⚠️ `auto` is excluded from that persistence: it is an instruction to the CLI to choose, not a
+   * level, so there is nothing meaningful to rebuild `--effort` from.
+   */
+  app.post('/api/sessions/:id/effort', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+    if (!requireClaudeSession(session, reply)) return reply;
+
+    const { effort } = parseBody(SessionEffortSchema, req.body);
+
+    const delivered = await session.writeViaMux(`/effort ${effort}\r`);
+    if (!delivered) {
+      return reply
+        .code(503)
+        .send(createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Could not deliver /effort to the session'));
+    }
+    if (isEffortLevel(effort)) {
+      session.setEffort(effort);
+      ctx.persistSessionState(session);
+    }
+    return { sent: true, command: `/effort ${effort}`, confirmPending: true };
   });
 
   function isCodexInjectedContext(text: string): boolean {

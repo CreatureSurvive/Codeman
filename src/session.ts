@@ -109,6 +109,7 @@ import {
 } from './session-cli-builder.js';
 import { SessionAutoOps } from './session-auto-ops.js';
 import { detectUsageLimitPause } from './usage-limit-patterns.js';
+import type { SessionModelInfo } from './usage-telemetry.js';
 import { SessionTaskCache } from './session-task-cache.js';
 import { InteractivePtyExitBreaker } from './session-pty-exit-breaker.js';
 import { parseTerminalAttachmentRequests } from './attachment-magic.js';
@@ -511,6 +512,22 @@ export class Session extends EventEmitter {
   // user can still switch in-session via /effort (incl. ultracode). Never carried as
   // the CLAUDE_CODE_EFFORT_LEVEL env var, which would hard-lock the session.
   private _effort: EffortLevel | undefined;
+
+  // Live model/effort observed from Claude's own statusLine telemetry (see usage-telemetry.ts).
+  //
+  // ⚠️ Deliberately SEPARATE from both neighbours, and merging them would break something:
+  //  - `_cliModel` is the startup-BANNER scrape, which is gone after a tmux recovery. Observation
+  //    is strictly better data, but the banner also carries the account type, so the two fields
+  //    answer different questions and the banner parser stays as it is.
+  //  - `_effort` is the SPAWN-time soft default that respawn rebuilds `--effort` from. Passively
+  //    promoting an observed level into it would silently change what a `/clear` cycle relaunches
+  //    with, on nothing more than the user having typed `/effort` once. An EXPLICIT change through
+  //    `POST /api/sessions/:id/effort` DOES update `_effort` — that is a stated intent, not an
+  //    observation.
+  private _observedModelId: string = '';
+  private _observedModelDisplayName: string = '';
+  private _observedEffort: string = '';
+  private _observedModelAt: number = 0;
 
   // tmux history-limit (scrollback lines) applied to this session's pane.
   private readonly _tmuxHistoryLimit: number;
@@ -1381,6 +1398,10 @@ export class Session extends EventEmitter {
       cliModel: this._cliModel || undefined,
       cliAccountType: this._cliAccountType || undefined,
       cliLatestVersion: this._cliLatestVersion || undefined,
+      activeModel: this._observedModelDisplayName || undefined,
+      activeModelId: this._observedModelId || undefined,
+      activeEffort: this._observedEffort || undefined,
+      activeModelAt: this._observedModelAt || undefined,
       backend: this.getBackendInfo(),
       openCodeConfig: this._openCodeConfig,
       codexConfig: this._codexConfig,
@@ -2900,6 +2921,72 @@ export class Session extends EventEmitter {
         this._autoOps.checkAutoClear();
       }
     }
+  }
+
+  /**
+   * The live model + effort Claude last reported, plus when.
+   *
+   * `effort` is empty for a model with no effort dial, which is different from "not yet observed"
+   * — `at` is 0 in the second case, so a caller can tell them apart.
+   */
+  get configuredEffort(): EffortLevel | undefined {
+    return this._effort;
+  }
+
+  get activeModelInfo(): { model: string; modelId: string; effort: string; at: number } {
+    return {
+      model: this._observedModelDisplayName,
+      modelId: this._observedModelId,
+      effort: this._observedEffort,
+      at: this._observedModelAt,
+    };
+  }
+
+  /**
+   * Record the model/effort Claude reported on its latest statusline render.
+   *
+   * ⚠️ Fields are merged, never replaced wholesale. `effort` is absent from the payload for every
+   * model that has no effort dial, and a render can carry the model alone — so an absent key must
+   * leave the last known-good value alone rather than blanking a value the UI is displaying.
+   * Clearing an effort that genuinely went away is not worth the flicker of clearing one that was
+   * merely omitted.
+   *
+   * @returns true when a DISPLAYED value changed, so the caller can broadcast only on a real
+   *   change. The statusline fires on every assistant message, and these values move once a day.
+   */
+  applyModelObservation(info: SessionModelInfo | null): boolean {
+    if (!info) return false;
+    let changed = false;
+    if (info.modelId && info.modelId !== this._observedModelId) {
+      this._observedModelId = info.modelId;
+      changed = true;
+    }
+    if (info.modelDisplayName && info.modelDisplayName !== this._observedModelDisplayName) {
+      this._observedModelDisplayName = info.modelDisplayName;
+      changed = true;
+    }
+    if (info.effortLevel && info.effortLevel !== this._observedEffort) {
+      this._observedEffort = info.effortLevel;
+      changed = true;
+    }
+    // Stamp on every observation, even an unchanged one: the stamp answers "is this value still
+    // live?", which a stale-looking session needs regardless of whether the model moved.
+    this._observedModelAt = Date.now();
+    return changed;
+  }
+
+  /**
+   * Adopt an effort level the user chose THROUGH Codeman.
+   *
+   * Unlike an observation this rewrites the spawn-time `_effort`, so a respawn relaunches with the
+   * level the user asked for instead of reverting to whatever the session was created with. That
+   * asymmetry is the whole point: an explicit request is a durable preference, a statusline render
+   * is just a reading.
+   */
+  setEffort(effort: EffortLevel): void {
+    this._effort = effort;
+    this._observedEffort = effort;
+    this._observedModelAt = Date.now();
   }
 
   // Parse Claude Code CLI info from terminal startup output

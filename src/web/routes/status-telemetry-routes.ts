@@ -18,11 +18,12 @@ import { parseBody } from '../route-helpers.js';
 import {
   parseStatusTelemetry,
   parseSessionStatus,
+  parseSessionModelInfo,
   formatSessionStatusText,
   telemetrySignature,
   type RawStatuslinePayload,
 } from '../../usage-telemetry.js';
-import { SessionStatusTelemetry } from '../sse-events.js';
+import { SessionStatusTelemetry, SessionModelInfo } from '../sse-events.js';
 import { setLatestPlanUsage } from '../plan-usage-latest.js';
 import type { SessionPort, EventPort } from '../ports/index.js';
 
@@ -37,12 +38,28 @@ export function registerStatusTelemetryRoutes(app: FastifyInstance, ctx: Session
     reply.type('text/plain; charset=utf-8');
 
     // Unknown session — minimal footer, no broadcast.
-    if (!ctx.sessions.has(sessionId)) {
+    const session = ctx.sessions.get(sessionId);
+    if (!session) {
       lastSig.delete(sessionId);
       return 'codeman';
     }
 
     const payload = data as RawStatuslinePayload | undefined;
+
+    // Live model + effort → stored on the Session (so they ride toState into every list and
+    // reconnect) and broadcast only on a real change. This is the ONLY reliable source for
+    // either: the banner scrape behind `cliModel` is gone after a tmux recovery, and `effort` is
+    // the spawn-time default, stale the moment the user runs `/effort`.
+    if (session.applyModelObservation(parseSessionModelInfo(payload))) {
+      const info = session.activeModelInfo;
+      ctx.broadcast(SessionModelInfo, {
+        sessionId,
+        model: info.model || undefined,
+        modelId: info.modelId || undefined,
+        effort: info.effort || undefined,
+        observedAt: info.at,
+      });
+    }
 
     // Plan-usage limits (account-wide) → broadcast to the header chip, when
     // present and changed (the statusline fires on every assistant message).

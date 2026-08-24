@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The session's conversation as a native document, as an alternative to the Ghostty grid.
 ///
@@ -16,8 +17,46 @@ struct SessionTranscriptView: View {
     let sessionID: String
 
     @State private var feed: TranscriptFeed?
-    /// Cleared once the user scrolls, so a jump to the bottom never fights a deliberate scroll up.
-    @State private var followsTail = true
+    /// Distance from the bottom, in points, straight from the scroll view's own geometry.
+    ///
+    /// ⚠️ Replaces a drag heuristic that only ever set "the user scrolled away" and never cleared
+    /// it — which is why the jump button showed permanently, including when already at the bottom.
+    /// Geometry is the only thing that actually knows where the viewport is.
+    @State private var distanceFromBottom: CGFloat = 0
+
+    /// Within a screenful of the end: close enough to keep following new output.
+    private var isNearBottom: Bool { distanceFromBottom < Self.nearBottomSlack }
+
+    private static let nearBottomSlack: CGFloat = 120
+
+    /// The two geometry values the view reacts to, read in one pass.
+    private struct ScrollMetrics: Equatable {
+        var distanceFromBottom: CGFloat
+        var bottomInset: CGFloat
+    }
+
+    /// ⚠️ Drives scrolling by EDGE, not by row id. `ScrollViewProxy.scrollTo(id:)` is a silent
+    /// no-op when the target row has not been realised by the `LazyVStack` — which is exactly the
+    /// case when the user is far up a long conversation and taps "jump to latest". Targeting the
+    /// bottom edge needs no row to exist.
+
+    /// The CLI's own status line while a turn is running.
+    @State private var workingStatus: WorkingStatusReader.Status?
+
+    /// The agent is mid-turn.
+    private var isWorking: Bool { model.session(id: sessionID)?.effectiveStatus == .busy }
+
+    /// Whether the opening scroll-to-bottom has run, so it happens once rather than on every
+    /// content change (which would fight the reader scrolling up).
+    @State private var hasSettledAtBottom = false
+    /// False until the opening layout has been parked at the newest message.
+    ///
+    /// ⚠️ Gates the top-of-list auto-paging. A `LazyVStack` realises its LEADING rows during the
+    /// first layout pass, so the "load earlier" sentinel's `onAppear` fired the instant a chat
+    /// opened — which cleared `followsTail` and re-anchored the viewport to the top of the page it
+    /// had just fetched. That is why opening a chat did not land at the end, and why the jump
+    /// button was already showing before the reader had touched anything.
+    @State private var hasSettled = false
 
     var body: some View {
         Group {
@@ -27,14 +66,48 @@ struct SessionTranscriptView: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        // ⚠️ `safeAreaInset`, not a VStack. Stacking the composer below the scroll view gave it its
+        // own strip and content stopped dead above it; as a safe-area inset the transcript extends
+        // BEHIND the glass and the scroll view gets matching content insets for free — which is
+        // also what keeps the last message reachable when the keyboard is up, since the keyboard
+        // grows the same safe area.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            // Only where sending makes sense: a session with no transcript has nothing to reply
+            // into, and the empty state already points at the terminal.
+            if feed?.availability != .unsupported {
+                TranscriptComposer(sessionID: sessionID)
+            }
+        }
         .background(Color(.systemGroupedBackground))
+        // Links in agent prose open in-app rather than switching to Safari and losing the
+        // reader's place. Applied here because this view presents no sheet of its own.
+        .inAppBrowser()
         .onAppear {
             let created = model.ensureTranscriptFeed(for: sessionID)
             feed = created
             created?.start()
         }
         .onDisappear { feed?.stop() }
-        .accessibilityIdentifier("transcript.\(sessionID)")
+        // ⚠️ Polled only while working, and separately from the transcript. The status line lives
+        // in the PANE, not the JSONL — Claude writes no transcript entry for "still thinking" — so
+        // it can only come from a terminal capture, and capturing on every transcript poll would
+        // double the request rate for a session that is sitting idle.
+        .task(id: isWorking) {
+            guard isWorking else {
+                workingStatus = nil
+                return
+            }
+            while !Task.isCancelled, isWorking {
+                if let api = model.apiClient,
+                   let snapshot = try? await api.terminalSnapshot(
+                       id: sessionID, full: false, tailBytes: 4096, scope: model.scope
+                   ) {
+                    workingStatus = WorkingStatusReader.parse(snapshot.terminalBuffer)
+                }
+                try? await Task.sleep(for: .milliseconds(1200))
+            }
+            workingStatus = nil
+        }
     }
 
     @ViewBuilder
@@ -50,7 +123,7 @@ struct SessionTranscriptView: View {
                 Text("This Codeman server is older than the transcript view. Update the server to enable it — the terminal works either way.")
             } actions: {
                 Button("Show Terminal") { model.setViewMode(.terminal, for: sessionID) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassAction)
             }
         } else if case .unavailable(let reason) = feed.availability, feed.blocks.isEmpty {
             ContentUnavailableView {
@@ -59,7 +132,7 @@ struct SessionTranscriptView: View {
                 Text(reason)
             } actions: {
                 Button("Show Terminal") { model.setViewMode(.terminal, for: sessionID) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassAction)
             }
         } else if feed.blocks.isEmpty, feed.isLoading {
             ProgressView("Loading conversation…").frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -70,7 +143,7 @@ struct SessionTranscriptView: View {
                 Text(error)
             } actions: {
                 Button("Try Again") { feed.refresh() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.glassAction)
                 Button("Show Terminal") { model.setViewMode(.terminal, for: sessionID) }
             }
         } else if feed.blocks.isEmpty, feed.availability == .unknown {
@@ -89,57 +162,149 @@ struct SessionTranscriptView: View {
 
     private func transcript(_ feed: TranscriptFeed) -> some View {
         ScrollViewReader { proxy in
+            // ⚠️ A ZStack, so the button is a SIBLING of the scroll view rather than its overlay.
+            // As an overlay it passed `isHittable` and the tap synthesized, but the action never
+            // ran — a `Button` layered onto a `ScrollView` sits inside that scroll view's gesture
+            // territory, and the pan recognizer claims the touch. Hittability and gesture
+            // ownership are different questions, which is why the geometry looked fine every time.
+            ZStack(alignment: .bottom) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    if feed.truncated {
-                        Text("Showing the most recent \(feed.blocks.count) of \(feed.totalBlocks) entries")
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    // Top-of-list affordance. `onAppear` on a sentinel is how a LazyVStack learns
+                    // the reader has scrolled to the top; the explicit button is the fallback for
+                    // when the sentinel never appears (a short page that never scrolls).
+                    if feed.canLoadOlder {
+                        HStack {
+                            Spacer()
+                            if feed.isLoadingOlder {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Button("Load earlier messages") { loadOlder(proxy) }
+                                    .font(.caption)
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .padding(.vertical, 6)
+                        // Gated on `hasSettled` — see there. Until the opening scroll has run this
+                        // row is realised but nowhere near the screen, and paging off it threw the
+                        // reader to the top. The explicit button above stays live either way, which
+                        // is what covers a first page too short to ever scroll.
+                        .onAppear {
+                            guard hasSettled else { return }
+                            loadOlder(proxy)
+                        }
+                        .accessibilityIdentifier("transcript.loadOlder")
+                    } else if feed.truncated {
+                        Text("Beginning of the loaded history")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
                             .padding(.bottom, 2)
                     }
 
-                    ForEach(feed.blocks) { block in
-                        TranscriptBlockView(block: block)
-                            .id(block.id)
+                    // ⚠️ Renders the GROUPED timeline, not the raw block list. A turn runs a
+                    // dozen tools between two sentences; one card each buries the prose the
+                    // reader actually wants. See `TranscriptTimeline`.
+                    ForEach(TranscriptTimeline.build(feed.blocks)) { item in
+                        switch item {
+                        case .block(let block):
+                            TranscriptBlockView(block: block, sessionID: sessionID).id(item.id)
+                        case .steps(let group):
+                            ToolStepRow(group: group, sessionID: sessionID).id(item.id)
+                        }
                     }
 
-                    // Anchor for scroll-to-bottom: targeting the last block scrolls its TOP into
-                    // view, which leaves a long final message hanging off the bottom of the screen.
-                    Color.clear.frame(height: 1).id(Self.bottomAnchor)
+                    if isWorking {
+                        WorkingIndicatorView(status: workingStatus)
+                            .padding(.top, 2)
+                            .id(Self.workingRowID)
+                    }
+
+                    // ⚠️ NOT a 1pt spacer. `scrollTo` can only reach a child the LazyVStack has
+                    // actually realised, and a zero-height clear view near the bottom often is
+                    // not — which is why both the initial scroll and the jump button silently did
+                    // nothing. A real, measurable footer is reachable.
+                    Color.clear
+                        .frame(height: 8)
+                        .id(Self.bottomAnchor)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 16)
+                // ⚠️ On the CONTENT, not on the outer container. `accessibilityIdentifier`
+                // propagates to descendants, so identifying the whole view overwrote the
+                // jump button's own id inside the overlay — it rendered and worked, but was
+                // unaddressable, which is indistinguishable from "missing" in a UI test.
+                .accessibilityIdentifier("transcript.\(sessionID)")
             }
-            .scrollDismissesKeyboard(.interactively)
+            // ⚠️ NO `.scrollPosition(_:)` here, and adding one back will break scrolling outright.
+            // A bound `ScrollPosition` is re-asserted on every body evaluation, and this view
+            // re-evaluates constantly because the geometry observer below writes state on each
+            // frame — so the binding reverted every drag and the list became unscrollable. That is
+            // the real defect behind three rounds of "the jump button does nothing": measured with
+            // screenshots, three fast swipes moved the content by zero pixels, and the button was
+            // appearing only because `contentSize.height` grows as LazyVStack rows realise, which
+            // inflates the distance-from-bottom while the view sits pinned. The scroll view owns
+            // its own position; imperative jumps go through the proxy.
+            // ⚠️ `.immediately`, not `.interactively`. An interactive dismiss ties the keyboard's
+            // position to the drag, and this view ALSO re-pins the bottom whenever the safe-area
+            // inset changes — so the two drive the inset against each other and the gesture stalls
+            // partway, leaving a gap between the composer and a half-dismissed keyboard. Dismissing
+            // outright on the first downward drag has one owner and always completes.
+            .scrollDismissesKeyboard(.immediately)
+            // ⚠️ `.initialOffset` ONLY. A plain `.defaultScrollAnchor(.bottom)` also re-anchors on
+            // every content/inset size change, so each time the composer grew a line the list
+            // jumped — the "insets doubled" effect. Restricting it to the initial offset keeps
+            // "opens at the newest message" without re-pinning afterwards.
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
+            // ⚠️ ONE observer, two jobs. `onScrollGeometryChange` does not stack: applying it
+            // twice to the same view keeps only one, so a second copy silently disabled the
+            // distance tracking and the jump button stopped working. Both values are therefore
+            // read in a single pass.
+            //
+            // ⚠️ `visibleRect`, not offset/inset arithmetic. Deriving the distance from
+            // `contentOffset + containerSize` has to account for both content insets, and with a
+            // `safeAreaInset` composer plus a nav bar the sign is easy to get wrong — an earlier
+            // attempt reported a large distance while sitting at the bottom, so the button showed
+            // permanently. `visibleRect` is already inset-corrected.
+            .onScrollGeometryChange(for: ScrollMetrics.self) { geometry in
+                ScrollMetrics(
+                    distanceFromBottom: max(0, geometry.contentSize.height - geometry.visibleRect.maxY),
+                    bottomInset: geometry.contentInsets.bottom
+                )
+            } action: { old, new in
+                distanceFromBottom = new.distanceFromBottom
+                // The keyboard grows the bottom safe area, shrinking the viewport; the content
+                // does not move with it, so the last message would slide underneath. Re-pin only
+                // when already at the bottom, so a reader scrolled up into history is never yanked.
+                // ⚠️ Only when the keyboard is APPEARING (inset grew). Re-pinning as it retracts
+                // fights the dismissal animation, which is the other half of the stuck-keyboard
+                // bug — on the way out the content already has room and needs no help.
+                if new.bottomInset > old.bottomInset, old.distanceFromBottom < Self.nearBottomSlack {
+                    scrollToBottom(proxy, animated: false)
+                }
+            }
             .refreshable { feed.refresh() }
             .onChange(of: feed.lastBlockID) { _, _ in
-                guard followsTail else { return }
-                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
+                // Follow new output only while the reader is already at the end; scrolling up to
+                // read history must not be yanked away by an arriving block.
+                guard isNearBottom else { return }
+                scrollToBottom(proxy, animated: true)
             }
-            .onAppear { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
-            .overlay(alignment: .bottomTrailing) {
-                if !followsTail {
-                    Button {
-                        followsTail = true
-                        withAnimation { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
-                    } label: {
-                        Image(systemName: "arrow.down")
-                            .font(.callout.weight(.semibold))
-                            .padding(10)
-                            .background(.thinMaterial, in: Circle())
-                    }
-                    .padding(16)
-                    .accessibilityLabel("Jump to latest")
-                }
+            // ⚠️ Confirms the opening position, then arms the top sentinel. `defaultScrollAnchor`
+            // places the FIRST layout, but the rows re-measure straight after it — markdown
+            // reflows and images resize as they resolve — which leaves the viewport short of the
+            // end. The belt-and-braces that used to sit here watched `feed.blocks.isEmpty`, which
+            // is dead inside this view: the ScrollView is only built once blocks are non-empty, so
+            // `wasEmpty` was never true and nothing ever ran.
+            .task(id: sessionID) {
+                hasSettled = false
+                try? await Task.sleep(for: .milliseconds(120))
+                guard !Task.isCancelled else { return }
+                scrollToBottom(proxy, animated: false)
+                hasSettled = true
             }
-            .simultaneousGesture(
-                // Any upward drag hands control to the user. Re-arming happens through the
-                // explicit jump button, never silently, so reading history is never yanked away.
-                DragGesture().onChanged { value in
-                    if value.translation.height > 12 { followsTail = false }
-                }
-            )
             .overlay(alignment: .top) {
                 if let error = feed.loadError {
                     Text(error)
@@ -150,24 +315,89 @@ struct SessionTranscriptView: View {
                         .padding(.top, 6)
                 }
             }
+
+            if !isNearBottom {
+                ScrollToBottomButton { scrollToBottom(proxy, animated: true) }
+                    .padding(.bottom, 12)
+                    // ⚠️ Both are load-bearing. Conditionally-inserted ZStack content does not
+                    // reliably keep the top of the z-order across re-renders, so without the
+                    // explicit index the touch fell THROUGH to whatever transcript row happened to
+                    // sit under the button — measured: tapping it opened a tool-step sheet instead
+                    // of scrolling. `isHittable` cannot catch that, because the button really is on
+                    // top geometrically; it just was not winning the gesture.
+                    .zIndex(1)
+                    .contentShape(Circle())
+            }
+            }
+            // Drives the button's scale transition on BOTH edges; without animating the value
+            // change it would appear and vanish instantly regardless of the transition.
+            .animation(.snappy(duration: 0.25), value: isNearBottom)
+        }
+    }
+
+    /// Scroll to the newest content.
+    ///
+    /// Targets the dedicated footer rather than the last block: the list renders
+    /// `TranscriptTimeline.build(...)`, which folds a run of consecutive tool calls into ONE row
+    /// keyed by its FIRST step, so `blocks.last!.id` is frequently not a rendered id at all and
+    /// `scrollTo` on an id the list does not contain fails silently.
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        // `Self.bottomAnchor` is a REAL 8pt footer rather than a zero-height spacer precisely so
+        // the proxy has something to resolve — `scrollTo` is a silent no-op on an id the layout
+        // cannot find.
+        if animated {
+            withAnimation(.snappy(duration: 0.25)) { proxy.scrollTo(Self.bottomAnchor, anchor: .bottom) }
+        } else {
+            proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+        }
+    }
+
+    /// Fetch the page above and keep the reader where they were.
+    ///
+    /// ⚠️ Prepending rows to a `LazyVStack` shifts everything below them down, so without
+    /// re-anchoring, loading history yanks the viewport to a different part of the conversation.
+    /// Pinning the previously-first block to the top is what makes it feel like scrolling.
+    private func loadOlder(_ proxy: ScrollViewProxy) {
+        guard let feed, feed.canLoadOlder, !feed.isLoadingOlder else { return }
+        Task {
+            guard let anchor = await feed.loadOlder() else { return }
+            await MainActor.run {
+                // No animation: an animated re-anchor reads as the list lurching.
+                proxy.scrollTo(anchor, anchor: .top)
+            }
         }
     }
 
     private static let bottomAnchor = "transcript.bottom"
+    private static let workingRowID = "transcript.working.row"
 }
 
 // MARK: - Block dispatch
 
 struct TranscriptBlockView: View {
     let block: TranscriptBlock
+    let sessionID: String
 
     var body: some View {
         switch block {
-        case .user(let b): UserBubbleView(block: b)
-        case .assistant(let b): AssistantBlockView(block: b)
+        case .user(let b): UserBubbleView(block: b, sessionID: sessionID)
+        case .assistant(let b): AssistantBlockView(block: b, sessionID: sessionID)
         case .thinking(let b): ThinkingBlockView(block: b)
-        case .toolCall(let b): ToolCallView(block: b)
-        case .diff(let b): DiffBlockView(block: b)
+        // Tool calls and edits never render inline any more — they are folded into a
+        // `ToolStepRow` by `TranscriptTimeline` and opened from its sheet. Reaching here would
+        // mean the grouping missed a case, so show the compact row rather than nothing.
+        case .toolCall, .diff:
+            ToolStepRow(
+                group: TranscriptTimeline.StepGroup(
+                    id: block.id,
+                    steps: [block],
+                    summary: TranscriptTimeline.summarize([block]),
+                    addedLines: 0,
+                    removedLines: 0,
+                    isRunning: false
+                ),
+                sessionID: sessionID
+            )
         }
     }
 }
@@ -176,31 +406,88 @@ struct TranscriptBlockView: View {
 
 private struct UserBubbleView: View {
     let block: TranscriptBlock.UserBlock
+    let sessionID: String
+
+    @Environment(AppModel.self) private var appModel
+
+    /// Local echo: sent, but not yet written to the transcript by the CLI.
+    private var isPending: Bool { block.id.hasPrefix("pending:") }
+
+    /// The agent is mid-turn, so a delivered prompt is queued behind it.
+    private var isWorking: Bool { appModel.session(id: sessionID)?.effectiveStatus == .busy }
+
+    private var pendingLabel: String { isWorking ? "Queued" : "Sending…" }
+
+    @State private var zoomed: UIImage?
 
     var body: some View {
         HStack {
             Spacer(minLength: 40)
             VStack(alignment: .leading, spacing: 6) {
-                if !block.text.isEmpty {
-                    Text(block.text)
+                if let prose = AttachedImagePaths.strippingPaths(from: block.text) {
+                    Text(prose)
                         .font(.body)
                         .textSelection(.enabled)
+                        // ⚠️ Required because of the image strip below. A horizontal ScrollView
+                        // advertises a large ideal width, the HStack hands this Text less than it
+                        // asked for, and Text truncates rather than wrapping — the message ended
+                        // mid-word with an ellipsis while the full string was present.
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                if block.imageCount > 0 {
-                    Label(
-                        block.imageCount == 1 ? "1 image" : "\(block.imageCount) images",
-                        systemImage: "photo"
-                    )
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                // Images the transcript itself carries (what Claude recorded), plus pictures the
+                // user attached — those arrive as a PATH in the text, because Codeman types into a
+                // terminal and a path is what the agent can open. Rendering the path as a picture
+                // is what makes an attachment look attached rather than pasted.
+                let attachedPaths = AttachedImagePaths.matches(in: block.text)
+                if !block.images.isEmpty || !attachedPaths.isEmpty {
+                    // A horizontal strip, not a stacked list: several screenshots in one message
+                    // otherwise push the conversation off the screen for the length of a scroll.
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(block.images) { ref in
+                                TranscriptImageView(sessionID: sessionID, reference: ref) { zoomed = $0 }
+                            }
+                            ForEach(attachedPaths) { match in
+                                AttachedImageView(sessionID: sessionID, path: match.path) { zoomed = $0 }
+                            }
+                        }
+                    }
                 }
                 if block.truncated { TruncationNote() }
+
+                if isPending {
+                    // ⚠️ "Queued", not "Sending", once the agent is working. Delivery already
+                    // succeeded — the POST returned — so the message is sitting in Claude Code's
+                    // queue waiting for the current turn to end. Calling that "sending" reads as a
+                    // failure when nothing has failed.
+                    Label(pendingLabel, systemImage: isWorking ? "clock.badge.checkmark" : "clock")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(Color.accentColor.opacity(0.16), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .opacity(isPending ? 0.65 : 1)
         }
         .accessibilityIdentifier("transcript.user")
+        .transcriptMessageMenu(
+            // A local echo is controllable — it has not run yet, whether it is queued behind a
+            // turn or still landing. Anything already in the transcript has run and can only be
+            // copied.
+            state: isPending ? .queued : .settled,
+            text: block.text,
+            sessionID: sessionID,
+            onDismiss: { appModel.transcriptFeeds[sessionID]?.dropPending(id: block.id) }
+        )
+        .sheet(item: Binding(get: { zoomed.map(ZoomedUserImage.init) }, set: { zoomed = $0?.image })) { item in
+            TranscriptImageViewer(image: item.image)
+        }
+    }
+
+    private struct ZoomedUserImage: Identifiable {
+        let image: UIImage
+        var id: String { "\(image.hashValue)" }
     }
 }
 
@@ -208,14 +495,22 @@ private struct UserBubbleView: View {
 
 private struct AssistantBlockView: View {
     let block: TranscriptBlock.AssistantBlock
+    let sessionID: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            MarkdownText(text: block.text)
+            // A limit notice or tool failure arrives as ordinary assistant text; styling it as a
+            // callout is what keeps it from being read past.
+            if let notice = NoticeStyle.classify(block.text) {
+                NoticeBlockView(style: notice, text: block.text)
+            } else {
+                MarkdownText(text: block.text)
+            }
             if block.truncated { TruncationNote() }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("transcript.assistant")
+        .transcriptMessageMenu(state: .settled, text: block.text, sessionID: sessionID)
     }
 }
 
@@ -267,213 +562,6 @@ struct ThinkingBlockView: View {
         .padding(.vertical, 10)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityIdentifier("transcript.thinking")
-    }
-}
-
-// MARK: - Tool call
-
-/// A tool execution as a compact accordion: name and one-line gist collapsed, full input and
-/// output expanded.
-///
-/// Collapsed by default and deliberately so — a real turn runs dozens of tools, and expanding them
-/// all would bury the conversation under command output. A failure is the exception: it is tinted
-/// red so it is findable without opening every row.
-struct ToolCallView: View {
-    let block: TranscriptBlock.ToolCallBlock
-
-    @State private var expanded = false
-
-    var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 10) {
-                if let input = block.input, !input.isEmpty {
-                    labelled("Input") {
-                        CodeBlockView(code: input, language: nil)
-                        if block.inputTruncated { TruncationNote() }
-                    }
-                }
-                if let result = block.result, !result.isEmpty {
-                    labelled(block.isError ? "Error" : "Output") {
-                        CodeBlockView(code: result, language: nil)
-                        if block.resultTruncated {
-                            Text(resultTruncationNote)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                } else if block.isRunning {
-                    Label("Still running", systemImage: "clock")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.top, 8)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.caption)
-                    .foregroundStyle(block.isError ? .red : .secondary)
-                    .frame(width: 16)
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(displayName)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(block.isError ? .red : .primary)
-                    if let summary = block.summary, !summary.isEmpty {
-                        Text(summary)
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-
-                Spacer(minLength: 0)
-
-                if block.isRunning {
-                    ProgressView().controlSize(.mini)
-                }
-            }
-            // ⚠️ The identifier goes on the LABEL, not on the DisclosureGroup. Applied to the
-            // group it propagates to every descendant, so the expanded content's own identifiers
-            // (the code blocks' Copy buttons) are overwritten with this one and become
-            // unaddressable — verified in the accessibility tree.
-            .accessibilityIdentifier("transcript.tool.\(block.name)")
-        }
-        .disclosureGroupStyle(.automatic)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay {
-            if block.isError {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(.red.opacity(0.4), lineWidth: 1)
-            }
-        }
-    }
-
-    private var resultTruncationNote: String {
-        guard let length = block.resultLength, let shown = block.result?.count, length > shown else {
-            return "Output truncated"
-        }
-        return "Showing \(shown.formatted()) of \(length.formatted()) characters"
-    }
-
-    /// MCP tools arrive as `mcp__server__tool`, which is unreadable in a narrow row.
-    private var displayName: String {
-        guard block.name.hasPrefix("mcp__") else { return block.name }
-        let parts = block.name.dropFirst(5).components(separatedBy: "__")
-        guard parts.count >= 2 else { return block.name }
-        return "\(parts[1]) · \(parts[0])"
-    }
-
-    private var icon: String {
-        switch block.name {
-        case "Bash", "BashOutput": return "terminal"
-        case "Read", "NotebookRead": return "doc.text"
-        case "Glob", "Grep", "ToolSearch": return "magnifyingglass"
-        case "WebFetch", "WebSearch": return "globe"
-        case "Task", "Agent": return "person.2"
-        default: return block.name.hasPrefix("mcp__") ? "puzzlepiece.extension" : "wrench.and.screwdriver"
-        }
-    }
-
-    @ViewBuilder
-    private func labelled(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-            content()
-        }
-    }
-}
-
-// MARK: - Diff
-
-/// A file edit, shown as removed/added rather than as the tool call that produced it.
-struct DiffBlockView: View {
-    let block: TranscriptBlock.DiffBlock
-
-    @State private var expanded = false
-
-    var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                if let old = block.oldText, !old.isEmpty {
-                    DiffSide(text: old, tint: .red, symbol: "minus", truncated: block.oldTruncated)
-                }
-                if let next = block.newText, !next.isEmpty {
-                    DiffSide(text: next, tint: .green, symbol: "plus", truncated: block.newTruncated)
-                }
-                if let result = block.result, !result.isEmpty {
-                    Text(result)
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                        .textSelection(.enabled)
-                }
-            }
-            .padding(.top, 8)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: block.isError ? "exclamationmark.triangle" : "square.and.pencil")
-                    .font(.caption)
-                    .foregroundStyle(block.isError ? .red : .orange)
-                    .frame(width: 16)
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(block.fileName ?? block.name)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if let path = block.filePath {
-                        Text(path)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                    }
-                }
-
-                Spacer(minLength: 0)
-
-                Text(block.oldText == nil ? "new file" : "edit")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .accessibilityIdentifier("transcript.diff")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-}
-
-private struct DiffSide: View {
-    let text: String
-    let tint: Color
-    let symbol: String
-    let truncated: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 4) {
-                Image(systemName: symbol).font(.caption2.weight(.bold))
-                Text(symbol == "minus" ? "Removed" : "Added").font(.caption2.weight(.semibold))
-            }
-            .foregroundStyle(tint)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(text)
-                    .font(.system(.footnote, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-            if truncated { TruncationNote() }
-        }
     }
 }
 

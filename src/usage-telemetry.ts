@@ -48,7 +48,17 @@ export interface RawStatuslinePayload {
   };
   context_window?: { used_percentage?: number; total_input_tokens?: number; total_output_tokens?: number };
   cost?: { total_cost_usd?: number };
-  model?: { display_name?: string };
+  model?: { id?: string; display_name?: string };
+  /**
+   * The session's LIVE effort level.
+   *
+   * ⚠️ Present only for models that support effort — CC 2.1.241 builds the payload as
+   * `...supportsEffort(model) && { effort: { level } }`, so an absent key means "this model has
+   * no effort dial", NOT "effort is unset". The value is always one of
+   * low|medium|high|xhigh|max: `auto` and `ultracode` are *inputs* to `/effort`, never values it
+   * reports back (the CLI resolves them before rendering).
+   */
+  effort?: { level?: string };
 }
 
 function clampPct(n: number): number {
@@ -98,6 +108,62 @@ export interface SessionStatus {
   inputTokens?: number;
   outputTokens?: number;
   contextUsedPercentage?: number;
+}
+
+/**
+ * The session's LIVE model and effort, as Claude itself reports them on every statusline render.
+ *
+ * ⚠️ This is the only reliable source for either value. `Session._cliModel` is scraped from the
+ * CLI's startup BANNER, which scrolls away and is gone entirely after a tmux recovery — measured
+ * null on all 11 live sessions. `Session._effort` is the SPAWN-time soft default, so it goes stale
+ * the moment the user runs `/effort` in-session. The statusline blob carries both, already flows
+ * into `POST /api/status-telemetry` on every assistant message, and costs nothing extra to read.
+ *
+ * Null when the payload carries neither, so a caller can leave a known-good value in place rather
+ * than blanking it on a partial render.
+ */
+export interface SessionModelInfo {
+  /** Canonical id, e.g. `claude-opus-4-5-20251101`. */
+  modelId?: string;
+  /** What the user sees, e.g. `Opus 4.5` or `Opus 4.8 (1M context)`. */
+  modelDisplayName?: string;
+  /** low|medium|high|xhigh|max — absent when the model has no effort dial. */
+  effortLevel?: string;
+}
+
+/**
+ * Effort levels Claude's statusline can report, which is also the set `/effort` accepts as a
+ * concrete level.
+ *
+ * ⚠️ Deliberately NOT `EFFORT_LEVELS` from `types/session.ts`: that one includes `ultracode`,
+ * which is a Codeman spawn flag (`--settings '{"ultracode":true}'`) rather than a level the CLI
+ * ever reports, and importing it here would couple this pure parser to the session types.
+ */
+export const STATUSLINE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/**
+ * Extract the live model + effort from a raw statusline payload.
+ *
+ * Separate from `parseSessionStatus` because the two have different lifetimes: session status is
+ * per-render display data that the footer rebuilds every time, while model/effort is durable state
+ * worth storing on the Session and broadcasting only when it CHANGES.
+ */
+export function parseSessionModelInfo(data: RawStatuslinePayload | undefined): SessionModelInfo | null {
+  if (!data) return null;
+  const info: SessionModelInfo = {};
+  if (typeof data.model?.id === 'string' && data.model.id) {
+    info.modelId = data.model.id.slice(0, 80);
+  }
+  if (typeof data.model?.display_name === 'string' && data.model.display_name) {
+    info.modelDisplayName = data.model.display_name.slice(0, 60);
+  }
+  const level = data.effort?.level;
+  // Ignore an unrecognized level rather than storing it: a future CLI could add one, and a value
+  // the UI cannot render is worse than showing the last known-good one.
+  if (typeof level === 'string' && (STATUSLINE_EFFORT_LEVELS as readonly string[]).includes(level)) {
+    info.effortLevel = level;
+  }
+  return Object.keys(info).length ? info : null;
 }
 
 /** Group a non-negative integer with thousands separators: 562411 → "562,411". */

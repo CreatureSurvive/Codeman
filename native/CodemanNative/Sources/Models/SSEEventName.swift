@@ -44,6 +44,7 @@ enum SSEEventName: RawRepresentable, Sendable, Hashable {
         case sessionInteractive = "session:interactive"
         case sessionRunning = "session:running"
         case sessionStatusTelemetry = "session:statusTelemetry"
+        case sessionModelInfo = "session:modelInfo"
 
         // Session: Ralph
         case sessionRalphLoopUpdate = "session:ralphLoopUpdate"

@@ -103,6 +103,7 @@ final class AppModel {
         }
         closeTerminal(for: id)
         closeTranscriptFeed(for: id)
+        setComposerDraft("", for: id)
     }
 
     /// Second pane on iPad. `nil` means single-pane.
@@ -124,6 +125,60 @@ final class AppModel {
 
     /// Per-session pane presentation. Absent means "use the preference".
     private var sessionViewModes: [String: SessionViewMode] = [:]
+
+    /// Unsent composer text, per session.
+    ///
+    /// ⚠️ Held here, not in the composer's `@State`. The composer is destroyed whenever the pane
+    /// switches to the terminal or the session is left, so a half-typed message died with it —
+    /// losing work the user had not sent yet. Persisted as well, so it also survives a relaunch.
+    private var composerDrafts: [String: String] = UserDefaults.standard
+        .dictionary(forKey: AppModel.draftsKey) as? [String: String] ?? [:]
+
+    private static let draftsKey = "codeman.native.composerDrafts"
+
+    /// Files staged in the composer but not yet sent, per session.
+    ///
+    /// ⚠️ Held as a LIST, not spliced into the draft text. Codeman ultimately delivers a path,
+    /// because it types into a terminal — but pasting that path into the field the moment you pick
+    /// a photo makes the composer look like a shell prompt. Staging the picks lets the composer
+    /// show thumbnails and only append the paths at send time.
+    private var pendingAttachments: [String: [PendingAttachment]] = [:]
+
+    struct PendingAttachment: Identifiable, Sendable, Equatable {
+        let id = UUID()
+        /// Server-side path the agent will open.
+        var path: String
+        var fileName: String
+        /// Local preview, so the chip shows the picture without a round trip.
+        var preview: UIImage?
+
+        static func == (lhs: PendingAttachment, rhs: PendingAttachment) -> Bool { lhs.id == rhs.id }
+    }
+
+    func attachments(for sessionID: String) -> [PendingAttachment] { pendingAttachments[sessionID] ?? [] }
+
+    func addAttachment(_ attachment: PendingAttachment, for sessionID: String) {
+        pendingAttachments[sessionID, default: []].append(attachment)
+    }
+
+    func removeAttachment(_ id: UUID, for sessionID: String) {
+        pendingAttachments[sessionID]?.removeAll { $0.id == id }
+    }
+
+    func clearAttachments(for sessionID: String) {
+        pendingAttachments.removeValue(forKey: sessionID)
+    }
+
+    func composerDraft(for sessionID: String) -> String { composerDrafts[sessionID] ?? "" }
+
+    func setComposerDraft(_ text: String, for sessionID: String) {
+        if text.isEmpty {
+            composerDrafts.removeValue(forKey: sessionID)
+        } else {
+            composerDrafts[sessionID] = text
+        }
+        UserDefaults.standard.set(composerDrafts, forKey: AppModel.draftsKey)
+    }
 
     /// Sessions ordered the way both web home screens order them.
     var orderedSessions: [SessionSnapshot] {

@@ -185,6 +185,28 @@ const safeEnvOverridesSchema = z
  */
 const effortLevelSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']).optional();
 
+/**
+ * Body of `POST /api/sessions/:id/model`.
+ *
+ * ⚠️ The charset is enforced at the route (`MODEL_NAME_PATTERN`) rather than here, because it is a
+ * safety property of the DELIVERY path — the value gets typed into Claude's composer — and belongs
+ * next to the `writeViaMux` call that relies on it, not in a schema a future caller could reuse
+ * for something that never touches a pane.
+ */
+export const SessionModelSchema = z.object({
+  model: z.string().min(1).max(80),
+});
+
+/**
+ * Body of `POST /api/sessions/:id/effort`.
+ *
+ * Accepts `auto` on top of the levels: `/effort auto` tells the CLI to choose, which is a valid
+ * instruction even though it is never a value the statusline reports back.
+ */
+export const SessionEffortSchema = z.object({
+  effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode', 'auto']),
+});
+
 // ========== Session Routes ==========
 
 /**
@@ -423,7 +445,18 @@ export const StatusTelemetrySchema = z.object({
         })
         .nullish(),
       cost: z.object({ total_cost_usd: z.number().nullish() }).nullish(),
-      model: z.object({ display_name: z.string().max(100).nullish() }).nullish(),
+      model: z
+        .object({
+          // The canonical id (`claude-opus-4-5-20251101`). Modeled alongside display_name because
+          // an id is stable enough to compare against, which a display name is not.
+          id: z.string().max(100).nullish(),
+          display_name: z.string().max(100).nullish(),
+        })
+        .nullish(),
+      // ⚠️ Must be modeled here or it never reaches the parser: z.object STRIPS unknown keys, so
+      // an unmodeled field is silently dropped rather than rejected — the failure mode is a live
+      // effort readout that is permanently empty, with no error anywhere to explain it.
+      effort: z.object({ level: z.string().max(20).nullish() }).nullish(),
     })
     .nullish(),
 });

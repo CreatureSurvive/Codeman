@@ -117,6 +117,14 @@ export const SessionInteractive = 'session:interactive' as const;
 export const SessionRunning = 'session:running' as const;
 /** Claude plan-usage telemetry (5-hour + weekly limits) parsed from the statusline. */
 export const SessionStatusTelemetry = 'session:statusTelemetry' as const;
+/**
+ * The session's live model / effort changed (from the same statusline payload).
+ *
+ * Separate from `session:statusTelemetry` because the two change on completely different clocks:
+ * plan usage drifts on every assistant message, while model and effort move only when the user
+ * switches them. Folding them together would fan out a redundant broadcast per message.
+ */
+export const SessionModelInfo = 'session:modelInfo' as const;
 
 // ─── Session: Ralph ──────────────────────────────────────────────────────────
 

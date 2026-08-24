@@ -519,6 +519,25 @@ export interface SessionState {
   cliAccountType?: string;
   /** Latest CLI version available (parsed from version check) */
   cliLatestVersion?: string;
+  /**
+   * LIVE model display name from Claude's statusLine telemetry, e.g. "Opus 4.5".
+   *
+   * ⚠️ Prefer this over `cliModel`, which is a startup-BANNER scrape and is therefore absent on
+   * every session recovered from tmux. Requires Codeman's statusLine exporter in the workspace —
+   * `GET /api/sessions/:id/model` installs it on demand.
+   */
+  activeModel?: string;
+  /** LIVE canonical model id from statusLine telemetry, e.g. "claude-opus-4-5-20251101". */
+  activeModelId?: string;
+  /**
+   * LIVE effort level from statusLine telemetry (low|medium|high|xhigh|max).
+   *
+   * ⚠️ Distinct from `effort`, which is the spawn-time soft default and goes stale the moment the
+   * user runs `/effort` in-session. Empty for a model with no effort dial.
+   */
+  activeEffort?: string;
+  /** Epoch ms of the last statusLine observation; absent means never observed. */
+  activeModelAt?: number;
   /** Non-secret backend badge metadata inferred from env/config. */
   backend?: SessionBackend;
   /** OpenCode-specific configuration (only for mode === 'opencode') */
