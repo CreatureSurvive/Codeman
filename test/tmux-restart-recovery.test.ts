@@ -121,6 +121,37 @@ describe('TmuxManager restart recovery (test mode safety)', () => {
     expect(recovered?.remote).toMatchObject({ hostId: 'gpu-box', host: '10.0.0.42', remotePath: '/home/ubuntu/work' });
   });
 
+  it('replaces a discovery placeholder with its persisted identity and metadata', () => {
+    manager.registerSession({
+      sessionId: 'restored-de51ecaf',
+      muxName: 'codeman-de51ecaf',
+      pid: 123,
+      createdAt: 1,
+      workingDir: '/server/home',
+      mode: 'claude',
+      attached: false,
+      name: 'Restored: codeman-de51ecaf',
+    });
+
+    const recoveredId = 'de51ecaf-1111-4222-8333-123456789abc';
+    expect(
+      manager.recoverSessionIdentity('restored-de51ecaf', recoveredId, {
+        workingDir: '/project',
+        name: 'Project session',
+        createdAt: 123_000,
+      })
+    ).toBe(true);
+
+    expect(manager.getSession('restored-de51ecaf')).toBeUndefined();
+    expect(manager.getSession(recoveredId)).toMatchObject({
+      sessionId: recoveredId,
+      muxName: 'codeman-de51ecaf',
+      workingDir: '/project',
+      name: 'Project session',
+      createdAt: 123_000,
+    });
+  });
+
   it('should not execute any tmux commands in test mode', async () => {
     manager.registerSession({
       sessionId: 'alive-session',

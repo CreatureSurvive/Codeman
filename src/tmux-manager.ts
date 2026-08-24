@@ -2566,6 +2566,50 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     return true;
   }
 
+  recoverSessionIdentity(
+    placeholderId: string,
+    recoveredId: string,
+    metadata: Partial<Pick<MuxSession, 'workingDir' | 'mode' | 'name' | 'createdAt'>> = {}
+  ): boolean {
+    const session = this.sessions.get(placeholderId);
+    if (!session || (placeholderId !== recoveredId && this.sessions.has(recoveredId))) return false;
+
+    this.sessions.delete(placeholderId);
+    Object.assign(session, metadata, { sessionId: recoveredId });
+    this.sessions.set(recoveredId, session);
+    this.saveSessions();
+    return true;
+  }
+
+  /** Read metadata tmux still owns when our registry has been lost. */
+  private inspectDiscoveredSession(muxName: string): { workingDir?: string; createdAt?: number } {
+    if (!isValidMuxName(muxName)) return {};
+    const target = shellescape(muxName);
+    const result: { workingDir?: string; createdAt?: number } = {};
+    try {
+      const workingDir = execSync(`${this.tmux()} display-message -p -t ${target} '#{pane_current_path}'`, {
+        encoding: 'utf-8',
+        timeout: EXEC_TIMEOUT_MS,
+      }).trim();
+      if (workingDir) result.workingDir = workingDir;
+    } catch {
+      /* Fall back to the server cwd below. */
+    }
+    try {
+      const createdSeconds = parseInt(
+        execSync(`${this.tmux()} display-message -p -t ${target} '#{session_created}'`, {
+          encoding: 'utf-8',
+          timeout: EXEC_TIMEOUT_MS,
+        }).trim(),
+        10
+      );
+      if (Number.isFinite(createdSeconds) && createdSeconds > 0) result.createdAt = createdSeconds * 1000;
+    } catch {
+      /* Date.now() remains the last-resort timestamp. */
+    }
+    return result;
+  }
+
   /**
    * Reconcile tracked sessions with actual running tmux sessions.
    */
@@ -2635,12 +2679,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
 
       const fragment = sessionName.replace(/^(?:codeman|claudeman)-/, '');
       const sessionId = `restored-${fragment}`;
+      const inspected = this.inspectDiscoveredSession(sessionName);
       const session: MuxSession = {
         sessionId,
         muxName: sessionName,
         pid,
-        createdAt: Date.now(),
-        workingDir: process.cwd(),
+        createdAt: inspected.createdAt ?? Date.now(),
+        workingDir: inspected.workingDir ?? process.cwd(),
         mode: 'claude',
         attached: false,
         name: `Restored: ${sessionName}`,

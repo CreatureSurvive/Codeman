@@ -2621,6 +2621,32 @@ export class WebServer extends EventEmitter {
       if (alive.length > 0 || discovered.length > 0) {
         console.log(`[Server] Found ${alive.length + discovered.length} alive mux session(s) from previous run`);
 
+        // If mux-sessions.json was lost, reconcile can only derive the first
+        // UUID fragment from `codeman-<fragment>` and creates a restored-* placeholder.
+        // state.json still carries the full identity in the common recovery case;
+        // adopt it before stale cleanup deletes that authoritative record.
+        const storedSessions = this.store.getSessions();
+        for (const placeholderId of discovered) {
+          const match = /^restored-([a-f0-9]{8,})$/i.exec(placeholderId);
+          if (!match) continue;
+          const fragment = match[1].toLowerCase();
+          const candidates = Object.entries(storedSessions).filter(([id]) =>
+            id.toLowerCase().startsWith(`${fragment}-`)
+          );
+          if (candidates.length !== 1) continue;
+          const [recoveredId, saved] = candidates[0];
+          if (
+            this.mux.recoverSessionIdentity(placeholderId, recoveredId, {
+              workingDir: saved.workingDir,
+              mode: saved.mode,
+              name: saved.name,
+              createdAt: saved.createdAt,
+            })
+          ) {
+            console.log(`[Server] Recovered persisted identity ${recoveredId} for mux placeholder ${placeholderId}`);
+          }
+        }
+
         // For each alive mux session, create a Session object if it doesn't exist
         const muxSessions = this.mux.getSessions();
         for (const muxSession of muxSessions) {

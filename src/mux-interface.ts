@@ -237,6 +237,17 @@ export interface TerminalMultiplexer extends EventEmitter {
    */
   reconcileSessions(): Promise<{ alive: string[]; dead: string[]; discovered: string[] }>;
 
+  /**
+   * Replace a discovery placeholder with the persisted identity it belongs to.
+   * Used when the tmux registry is missing but state.json still knows the full
+   * session UUID and metadata.
+   */
+  recoverSessionIdentity(
+    placeholderId: string,
+    recoveredId: string,
+    metadata?: Partial<Pick<MuxSession, 'workingDir' | 'mode' | 'name' | 'createdAt'>>
+  ): boolean;
+
   // ========== Stats Collection ==========
 
   /** Start periodic process stats collection */
