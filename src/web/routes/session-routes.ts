@@ -49,6 +49,12 @@ import {
 import { mergeSessionOrder } from '../../session-order.js';
 import { parseTranscriptBlocks, TRANSCRIPT_DEFAULTS } from '../../transcript-blocks.js';
 import {
+  commandNameFromRelativePath,
+  mergeSlashCommands,
+  parseCommandDescription,
+  type SlashCommand,
+} from '../../slash-commands.js';
+import {
   sessionWaits,
   resolveWaitSignals,
   signalForStatus,
@@ -1968,6 +1974,15 @@ export function registerSessionRoutes(
    */
   const TRANSCRIPT_BYTE_WINDOW = 1024 * 1024;
 
+  /**
+   * Media types a transcript image may be served as.
+   *
+   * An allowlist, not a passthrough: `media_type` is a string written into the transcript by
+   * whatever produced the image, and echoing it verbatim would let it choose the Content-Type the
+   * browser renders under. Anything unrecognised goes out as an inert octet-stream.
+   */
+  const ALLOWED_TRANSCRIPT_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
   /** Parse a query-string integer, falling back on anything non-numeric. */
   function clampInt(raw: string | undefined, fallback: number, min: number, max: number): number {
     const value = raw === undefined ? NaN : Number.parseInt(raw, 10);
@@ -1975,19 +1990,29 @@ export function registerSessionRoutes(
     return Math.min(Math.max(value, min), max);
   }
 
-  async function readTail(path: string, maxBytes: number): Promise<string> {
+  async function readTail(
+    path: string,
+    maxBytes: number,
+    endByte?: number
+  ): Promise<{ text: string; start: number; end: number }> {
     const handle = await fs.open(path, 'r');
     try {
       const { size } = await handle.stat();
-      const length = Math.min(size, maxBytes);
+      // `endByte` walks the window backwards for pagination; absent, read the live tail.
+      const end = endByte === undefined ? size : Math.max(0, Math.min(endByte, size));
+      const length = Math.min(end, maxBytes);
+      if (length <= 0) return { text: '', start: 0, end };
       const buffer = Buffer.allocUnsafe(length);
-      await handle.read(buffer, 0, length, size - length);
+      await handle.read(buffer, 0, length, end - length);
       const text = buffer.toString('utf8');
-      if (length >= size) return text;
-      // The read almost certainly began mid-line; drop the partial head so the
-      // parser is never handed a fragment that happens to parse as valid JSON.
+      const rawStart = end - length;
+      if (rawStart === 0) return { text, start: 0, end };
+      // The read almost certainly began mid-line; drop the partial head so the parser is never
+      // handed a fragment that happens to parse as valid JSON. The dropped bytes are added back
+      // to `start`, which is what makes the next page begin exactly where this one did.
       const newline = text.indexOf('\n');
-      return newline >= 0 ? text.slice(newline + 1) : '';
+      if (newline < 0) return { text: '', start: end, end };
+      return { text: text.slice(newline + 1), start: rawStart + newline + 1, end };
     } finally {
       await handle.close();
     }
@@ -2010,7 +2035,7 @@ export function registerSessionRoutes(
   app.get('/api/sessions/:id/transcript', async (req) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id, req);
-    const query = req.query as { limit?: string; maxBytes?: string };
+    const query = req.query as { limit?: string; maxBytes?: string; before?: string };
 
     if (session.mode !== 'claude') {
       return { available: false, reason: `${session.mode} sessions do not write a Claude transcript`, blocks: [] };
@@ -2035,20 +2060,216 @@ export function registerSessionRoutes(
 
     const limit = clampInt(query.limit, TRANSCRIPT_DEFAULTS.maxBlocks, 1, 1000);
     const maxBytes = clampInt(query.maxBytes, TRANSCRIPT_BYTE_WINDOW, 64 * 1024, 8 * 1024 * 1024);
+    // `before` is the previous page's `windowStart`: read the window that ENDS there.
+    const before = query.before === undefined ? undefined : clampInt(query.before, 0, 0, Number.MAX_SAFE_INTEGER);
 
     try {
-      const content = await readTail(transcript.path, maxBytes);
-      const parsed = parseTranscriptBlocks(content, { maxBlocks: limit });
+      const window = await readTail(transcript.path, maxBytes, before);
+      const parsed = parseTranscriptBlocks(window.text, { maxBlocks: limit });
       return {
         available: true,
         claudeSessionId: transcript.sessionId,
         blocks: parsed.blocks,
         truncated: parsed.truncated,
         totalBlocks: parsed.totalBlocks,
+        // Byte offset this page began at. Pass it back as `before` to read the page above it;
+        // `hasMore` is false once the window reaches the start of the file.
+        windowStart: window.start,
+        hasMore: window.start > 0,
       };
     } catch {
       return { available: false, reason: 'Transcript could not be read', blocks: [] };
     }
+  });
+
+  /**
+   * `GET /api/sessions/:id/transcript/image?ref=…` — the bytes behind a `TranscriptImageRef`.
+   *
+   * The transcript endpoint deliberately ships references rather than base64: Claude stores images
+   * inline and one screenshot is megabytes, so inlining even a few would dwarf the conversation.
+   * This serves a single image on demand, which is what makes an off-screen one free.
+   *
+   * ⚠️ `ref` addresses a position INSIDE the caller's own transcript (`<uuid>:<block>[:<content>]`)
+   * — it is not a path and cannot escape the file. It is still shape-validated before use, and the
+   * session is ownership-checked by `findSessionOrFail` exactly like every other read.
+   */
+  app.get('/api/sessions/:id/transcript/image', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+    const { ref } = req.query as { ref?: string };
+
+    if (session.mode !== 'claude') {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only claude sessions have a transcript');
+    }
+    // uuid:index[:index] — anything else is not a reference this server ever issued.
+    if (!ref || !/^[A-Za-z0-9._-]{1,128}:\d{1,4}(?::\d{1,4})?$/.test(ref)) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Malformed image reference');
+    }
+    const [uuid, blockPart, contentPart] = ref.split(':');
+    const blockIndex = Number.parseInt(blockPart, 10);
+    const contentIndex = contentPart === undefined ? undefined : Number.parseInt(contentPart, 10);
+
+    const projectsDir = join(process.env.HOME || '/tmp', '.claude', 'projects');
+    const transcript = await findClaudeTranscript(projectsDir, session.claudeSessionId || session.id, session.id);
+    if (!transcript) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'No transcript for this session');
+
+    // ⚠️ Scanned as a STREAM over the whole file, not from a tail window like the listing.
+    // A conversation's images are wherever the user posted them — often far above the tail — and
+    // windowing the lookup made every older image 404 while its reference resolved fine.
+    // Line-by-line with an early exit keeps memory flat over a multi-megabyte transcript.
+    const found = await findTranscriptImage(transcript.path, uuid, blockIndex, contentIndex);
+    if (found) {
+      const { bytes, mediaType: declared } = found;
+      const mediaType = ALLOWED_TRANSCRIPT_IMAGE_TYPES.has(declared ?? '')
+        ? (declared as string)
+        : 'application/octet-stream';
+      return (
+        reply
+          .header('Content-Type', mediaType)
+          .header('Content-Length', String(bytes.length))
+          // A transcript entry is immutable once written, so this can be cached hard.
+          .header('Cache-Control', 'private, max-age=86400, immutable')
+          .header('X-Content-Type-Options', 'nosniff')
+          .send(bytes)
+      );
+    }
+    return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Image not found in this transcript');
+  });
+
+  /**
+   * Locate one image inside a transcript by streaming it line by line.
+   *
+   * Streaming rather than reading the file: a transcript reaches tens of megabytes and the entry
+   * we want may be anywhere in it, so a windowed read makes older images unreachable while a whole
+   * read spikes memory for a single thumbnail. This holds one line at a time and stops at the hit.
+   */
+  async function findTranscriptImage(
+    path: string,
+    uuid: string,
+    blockIndex: number,
+    contentIndex: number | undefined
+  ): Promise<{ bytes: Buffer; mediaType?: string } | null> {
+    const { createReadStream } = await import('node:fs');
+    const { createInterface } = await import('node:readline');
+    const stream = createReadStream(path, { encoding: 'utf8' });
+    const reader = createInterface({ input: stream, crlfDelay: Infinity });
+    try {
+      for await (const line of reader) {
+        // Cheap reject before the parse: only a handful of lines mention any given uuid.
+        if (!line || !line.includes(uuid)) continue;
+        let entry: { uuid?: string; message?: { content?: unknown } };
+        try {
+          entry = JSON.parse(line) as typeof entry;
+        } catch {
+          continue;
+        }
+        if (entry.uuid !== uuid || !Array.isArray(entry.message?.content)) continue;
+
+        let block = entry.message.content[blockIndex] as Record<string, unknown> | undefined;
+        if (contentIndex !== undefined) {
+          const nested = (block as { content?: unknown })?.content;
+          block = Array.isArray(nested) ? (nested[contentIndex] as Record<string, unknown>) : undefined;
+        }
+        if (block?.type !== 'image') return null;
+        const source = block.source as { media_type?: string; data?: string } | undefined;
+        if (!source?.data) return null;
+        return { bytes: Buffer.from(source.data, 'base64'), mediaType: source.media_type };
+      }
+    } finally {
+      reader.close();
+      stream.destroy();
+    }
+    return null;
+  }
+
+  /** First 2KB of a command file — enough for frontmatter or a title. */
+  async function readCommandHead(path: string): Promise<string> {
+    const handle = await fs.open(path, 'r').catch(() => null);
+    if (!handle) return '';
+    try {
+      const buffer = Buffer.allocUnsafe(2048);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      return buffer.subarray(0, bytesRead).toString('utf8');
+    } catch {
+      return '';
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /**
+   * Walk one command directory.
+   *
+   * ⚠️ Depth-limited and count-capped. This reads a user-writable tree on every request, and an
+   * unbounded walk there is both a latency and a memory risk; commands nest one level at most in
+   * practice (`git/commit.md` → `/git:commit`).
+   */
+  async function readCommandDirectory(
+    root: string,
+    scope: 'project' | 'user',
+    maxCommands = 200
+  ): Promise<SlashCommand[]> {
+    const found: SlashCommand[] = [];
+
+    const walk = async (dir: string, prefix: string, depth: number): Promise<void> => {
+      if (depth > 2 || found.length >= maxCommands) return;
+      let entries: import('node:fs').Dirent[];
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        // A missing commands directory is the normal case, not an error.
+        return;
+      }
+      for (const entry of entries) {
+        if (found.length >= maxCommands) return;
+        if (entry.name.startsWith('.')) continue;
+        const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          await walk(join(dir, entry.name), relative, depth + 1);
+          continue;
+        }
+        const commandName = commandNameFromRelativePath(relative);
+        if (!commandName) continue;
+        const commandPath = join(dir, entry.name);
+        const head = await readCommandHead(commandPath);
+        found.push({
+          name: commandName,
+          description: parseCommandDescription(head),
+          scope,
+          path: commandPath,
+          ...(relative.includes('/') ? { namespace: relative.split('/')[0] } : {}),
+        });
+      }
+    };
+
+    await walk(root, '', 0);
+    return found;
+  }
+
+  /**
+   * `GET /api/sessions/:id/slash-commands` — the commands this session can actually run.
+   *
+   * Enumerates real files (`<workspace>/.claude/commands` and `~/.claude/commands`) rather than
+   * shipping a fixed list, so a picker shows the user's OWN commands. Built-ins are merged in
+   * because they exist only inside the CLI and cannot be discovered on disk.
+   *
+   * ⚠️ Claude-mode only. The other CLIs have their own command sets (or none), and listing
+   * Claude's commands for a codex pane would offer things that do nothing.
+   */
+  app.get('/api/sessions/:id/slash-commands', async (req) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+
+    if (session.mode !== 'claude') {
+      return { available: false, reason: `${session.mode} sessions have no Claude slash commands`, commands: [] };
+    }
+
+    const projectCommands = session.workingDir
+      ? await readCommandDirectory(join(session.workingDir, '.claude', 'commands'), 'project')
+      : [];
+    const userCommands = await readCommandDirectory(join(process.env.HOME || '/tmp', '.claude', 'commands'), 'user');
+
+    return { available: true, commands: mergeSlashCommands(projectCommands, userCommands) };
   });
 
   function isCodexInjectedContext(text: string): boolean {
