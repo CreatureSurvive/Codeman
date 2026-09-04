@@ -221,6 +221,24 @@ export class MockSession extends EventEmitter {
   /** CLI mode */
   mode: string = 'claude';
 
+  /** Mirrors `Session._launchCommand` — the custom-action command a `shell` pane runs. */
+  launchCommand: string | undefined;
+
+  /** Mirrors the badge metadata `Session.getBackendInfo()` derives from env overrides. */
+  backend: { type?: string } | undefined;
+
+  /**
+   * Mirrors `Session.usesClaudeLikeTerminal`: whether the claude TOOL is what runs in the pane.
+   * Claude-transcript surfaces key off this, not `mode` — a custom action launching `claude`
+   * (e.g. the GLM env preset) is a `shell`-mode session that still writes a Claude transcript.
+   */
+  get usesClaudeLikeTerminal(): boolean {
+    if (this.mode === 'claude') return true;
+    if (this.mode !== 'shell') return false;
+    const command = this.launchCommand ?? '';
+    return /(^|[\s"'`/])claude([\s"'`.]|$)/i.test(command) || this.backend?.type === 'anthropic';
+  }
+
   /** Live model/effort observed from statusLine telemetry — mirrors Session's merge semantics. */
   private observedModel = { model: '', modelId: '', effort: '', at: 0 };
 

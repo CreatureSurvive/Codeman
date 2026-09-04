@@ -2101,7 +2101,13 @@ export function registerSessionRoutes(
     const session = findSessionOrFail(ctx, id, req);
     const query = req.query as { limit?: string; maxBytes?: string; before?: string; since?: string };
 
-    if (session.mode !== 'claude') {
+    // ⚠️ Artifact-driven, not metadata-driven: a `shell` pane may be running the claude CLI (a
+    // custom action like the GLM preset does exactly that), and no launch-command/backend
+    // heuristic is reliable there — env overrides can be empty and the command arbitrary. Shell
+    // panes therefore attempt discovery like claude panes and answer by what they find; only the
+    // CLIs that categorically never write a Claude transcript get the categorical refusal. Same
+    // stance as `/last-response`, which has never gated on mode.
+    if (session.mode !== 'claude' && session.mode !== 'shell') {
       return { available: false, reason: `${session.mode} sessions do not write a Claude transcript`, blocks: [] };
     }
 
@@ -2178,7 +2184,9 @@ export function registerSessionRoutes(
     const session = findSessionOrFail(ctx, id, req);
     const { ref } = req.query as { ref?: string };
 
-    if (session.mode !== 'claude') {
+    // Same widened gate as the transcript listing — see there. A shell pane with no discoverable
+    // transcript falls through to the 404 below, which is the honest answer.
+    if (session.mode !== 'claude' && session.mode !== 'shell') {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Only claude sessions have a transcript');
     }
     // uuid:index[:index] — anything else is not a reference this server ever issued.
@@ -2333,14 +2341,16 @@ export function registerSessionRoutes(
    * shipping a fixed list, so a picker shows the user's OWN commands. Built-ins are merged in
    * because they exist only inside the CLI and cannot be discovered on disk.
    *
-   * ⚠️ Claude-mode only. The other CLIs have their own command sets (or none), and listing
-   * Claude's commands for a codex pane would offer things that do nothing.
+   * ⚠️ Claude/shell only: a `shell` pane may be running the claude CLI (custom actions), and the
+   * command files are discovered from disk, so serving them costs nothing for a plain shell.
+   * The other CLIs have their own command sets (or none), and listing Claude's commands for a
+   * codex pane would offer things that do nothing.
    */
   app.get('/api/sessions/:id/slash-commands', async (req) => {
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id, req);
 
-    if (session.mode !== 'claude') {
+    if (session.mode !== 'claude' && session.mode !== 'shell') {
       return { available: false, reason: `${session.mode} sessions have no Claude slash commands`, commands: [] };
     }
 

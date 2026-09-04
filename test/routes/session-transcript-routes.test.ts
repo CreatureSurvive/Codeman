@@ -88,15 +88,53 @@ describe('GET /api/sessions/:id/transcript', () => {
     expect(data.blocks[2]).toMatchObject({ name: 'Bash', result: 'a.ts' });
   });
 
-  // A shell or codex pane is working perfectly; it simply writes no Claude
-  // transcript. Reporting that as an error would make the UI cry wolf.
+  // A codex/opencode pane is working perfectly; it simply writes no Claude transcript.
+  // Reporting that as an error would make the UI cry wolf.
   it('answers 200 with available:false for a mode that writes no Claude transcript', async () => {
+    ctx._session.mode = 'codex';
+    const res = await app.inject({ method: 'GET', url: `/api/sessions/${ctx._sessionId}/transcript` });
+    expect(res.statusCode).toBe(200);
+    const data = JSON.parse(res.body).data;
+    expect(data).toMatchObject({ available: false, blocks: [] });
+    expect(data.reason).toContain('codex');
+  });
+
+  // A plain shell pane attempts discovery like any claude pane and answers by what it finds:
+  // nothing. Artifact-driven availability — no launch-command/backend heuristic decides whether
+  // a shell pane "counts" as claude, which is what the GLM custom actions need.
+  it('answers available:false with no transcript found for a plain shell pane', async () => {
     ctx._session.mode = 'shell';
     const res = await app.inject({ method: 'GET', url: `/api/sessions/${ctx._sessionId}/transcript` });
     expect(res.statusCode).toBe(200);
     const data = JSON.parse(res.body).data;
     expect(data).toMatchObject({ available: false, blocks: [] });
-    expect(data.reason).toContain('shell');
+    expect(data.reason).toBe('No transcript file yet');
+  });
+
+  // The GLM custom action: `mode: 'shell'` + a launch command that runs the claude CLI. The TOOL
+  // in the pane is claude and writes a normal Claude transcript, which discovery now finds —
+  // availability follows the artifact, not the session's mode classification.
+  it('serves the transcript for a shell session whose tool is claude', async () => {
+    ctx._session.mode = 'shell';
+    ctx._session.launchCommand = 'claude';
+    await writeTranscript(ctx._sessionId, [
+      entry({ type: 'user', uuid: 'u1', message: { role: 'user', content: 'build the view' } }),
+      entry({
+        type: 'assistant',
+        uuid: 'a1',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'On it.' }] },
+      }),
+    ]);
+
+    const res = await app.inject({ method: 'GET', url: `/api/sessions/${ctx._sessionId}/transcript` });
+    expect(res.statusCode).toBe(200);
+    const data = JSON.parse(res.body).data;
+    expect(data.available).toBe(true);
+    expect(data.blocks.map((b: { kind: string }) => b.kind)).toEqual(['user', 'assistant']);
+
+    // The composer's slash picker rides the same tool gate.
+    const commands = await app.inject({ method: 'GET', url: `/api/sessions/${ctx._sessionId}/slash-commands` });
+    expect(JSON.parse(commands.body).data.available).toBe(true);
   });
 
   it('answers available:false when the session has no transcript file yet', async () => {

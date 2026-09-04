@@ -1,5 +1,13 @@
 # aicodeman
 
+## 1.19.4
+
+### Patch Changes
+
+- Chat view (native transcript) now serves shell sessions that are actually running the claude CLI — a custom action like the GLM preset launches `claude` inside a `shell`-mode session, and the transcript/image/slash-command routes used to refuse it by mode. Availability is now artifact-driven: shell panes attempt the same transcript discovery claude panes do (history-correlated to the pane's own submits), and only CLIs that categorically never write a Claude transcript get the categorical refusal.
+
+  Also unreleased since 1.19.3: structured transcript endpoint with resumable polling and live model/effort (`d8107689`, `869dd2e7`), slash-command discovery + transcript image bytes (`3764078d`), SwiftUI iOS client (`a6d778d0`), custom run actions (`b0e54ae1`, `6d424786`), headless node dashboard + streamed proxied node events (`71071a16`, `1c230e9c`), native and federated session controls (`67d3480a`), mobile selection and native links in the terminal (`8b0ee1d4`), one authoritative terminal output stream with canonical pane-capture recovery (`1f38237c`, `90ed6c89`), and metadata preservation during mux recovery (`58dc085c`).
+
 ## 1.19.3
 
 ### Patch Changes
